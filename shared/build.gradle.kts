@@ -34,6 +34,7 @@ kotlin {
         }
         val desktopMain by getting {
             dependencies {
+                implementation("org.jmdns:jmdns:3.5.9")
                 implementation("dev.whyoleg.cryptography:cryptography-provider-jdk:0.6.0")
             }
         }

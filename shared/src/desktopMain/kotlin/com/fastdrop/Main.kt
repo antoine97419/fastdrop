@@ -4,6 +4,12 @@ import com.fastdrop.core.Peer
 import com.fastdrop.core.TransportType
 import com.fastdrop.transfer.FileMetadata
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.discovery.DiscoveryManager
+import com.fastdrop.discovery.DesktopMdnsDiscoveryProvider
+import com.fastdrop.discovery.DiscoveredPeer
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.cancel
 import com.fastdrop.security.FileIdentityStore
 import com.fastdrop.security.FileTrustedPeerStore
 import com.fastdrop.security.DesktopDeviceInfoProvider
@@ -36,6 +42,7 @@ fun main(): Unit = runBlocking {
     val identityStore = FileIdentityStore(File(homeDir, "identity.json"))
     val trustedPeerStore = FileTrustedPeerStore(File(homeDir, "trusted_peers.json"))
     val deviceInfoProvider = DesktopDeviceInfoProvider()
+    val discoveryManager = DiscoveryManager(listOf(DesktopMdnsDiscoveryProvider(deviceInfoProvider.getDeviceName())))
     
     when (choice) {
         "1" -> {
@@ -187,6 +194,7 @@ fun main(): Unit = runBlocking {
     }
     
     transport.stop()
+    discoveryManager.stopAll()
     exitProcess(0)
 }
 
