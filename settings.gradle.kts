@@ -15,5 +15,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "FastDrop"
 include(":shared")
-// include(":androidApp")
+include(":androidApp")
 // include(":desktopApp")

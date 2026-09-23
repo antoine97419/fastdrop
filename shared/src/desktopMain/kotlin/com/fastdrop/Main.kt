@@ -3,7 +3,8 @@ package com.fastdrop
 import com.fastdrop.core.Peer
 import com.fastdrop.core.TransportType
 import com.fastdrop.transfer.FileMetadata
-import com.fastdrop.transfer.TransferManager
+import com.fastdrop.transfer.*
+import com.fastdrop.discovery.*
 import com.fastdrop.discovery.DiscoveryManager
 import com.fastdrop.discovery.DesktopMdnsDiscoveryProvider
 import com.fastdrop.discovery.DiscoveredPeer
@@ -80,7 +81,6 @@ fun main(): Unit = runBlocking {
             }
             
             var targetFile: String? = null
-            var tempFile: String? = null
             
             val success = transferManager.receiveFile(
                 connection = secureChannel,
@@ -88,10 +88,8 @@ fun main(): Unit = runBlocking {
                     println("Incoming file: ${offer.name} (${offer.size / 1024 / 1024} MB)")
                     val safeName = transferManager.sanitizeFilename(offer.name)
                     targetFile = safeName
-                    tempFile = "$safeName.fastdrop-part"
-                    true // always accept for demo
+                    DesktopIncomingFileDestination(File(safeName)) // always accept for demo
                 },
-                fileSink = FileSystem.SYSTEM.sink(tempFile!!.toPath()),
                 onProgress = { current, total ->
                     val percent = if (total > 0) (current.toDouble() / total * 100).roundToInt() else 0
                     print("\rReceiving: $current / $total ($percent %)")
@@ -101,12 +99,9 @@ fun main(): Unit = runBlocking {
             println()
             if (success) {
                 println("Transfer successful! Hash verified.")
-                // Renaming part file safely
-                Files.move(File(tempFile!!).toPath(), File(targetFile!!).toPath(), StandardCopyOption.REPLACE_EXISTING)
                 println("File saved to $targetFile")
             } else {
                 println("Transfer failed or hash mismatch.")
-                File(tempFile!!).delete()
             }
         }
         "2" -> {
@@ -156,16 +151,13 @@ fun main(): Unit = runBlocking {
                     }
                 }
                 
-                val metadata = FileMetadata("transfer_${System.currentTimeMillis()}", file.name, file.length())
-                
                 val startTime = System.currentTimeMillis()
                 var lastTime = startTime
                 var lastBytes = 0L
                 
                 val success = transferManager.sendFile(
                     connection = secureChannel,
-                    metadata = metadata,
-                    fileSource = FileSystem.SYSTEM.source(file.toOkioPath()),
+                    fileSource = DesktopTransferFileSource(file),
                     onProgress = { current, total ->
                         val now = System.currentTimeMillis()
                         if (now - lastTime > 500 || current == total) {

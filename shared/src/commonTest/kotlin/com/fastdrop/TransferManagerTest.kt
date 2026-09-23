@@ -94,8 +94,11 @@ class TransferManagerTest {
             sec1.confirmPeer()
             transferManager.sendFile(
                 connection = sec1,
-                metadata = metadata,
-                fileSource = sourceBuffer
+                fileSource = object : com.fastdrop.transfer.TransferFileSource {
+                    override val name = metadata.name
+                    override val size = metadata.size
+                    override suspend fun openSource() = sourceBuffer
+                }
             )
         }
         
@@ -104,8 +107,13 @@ class TransferManagerTest {
             sec2.confirmPeer()
             transferManager.receiveFile(
                 connection = sec2,
-                onOfferReceived = { true },
-                fileSink = sinkBuffer
+                onOfferReceived = { 
+                    object : com.fastdrop.transfer.IncomingFileDestination {
+                        override suspend fun openSink() = sinkBuffer
+                        override suspend fun commit() {}
+                        override suspend fun abort() {}
+                    }
+                }
             )
         }
         

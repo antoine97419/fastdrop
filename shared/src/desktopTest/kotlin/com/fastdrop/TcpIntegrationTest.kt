@@ -3,7 +3,7 @@ package com.fastdrop
 import com.fastdrop.core.Peer
 import com.fastdrop.core.TransportType
 import com.fastdrop.security.*
-import com.fastdrop.transfer.FileMetadata
+import com.fastdrop.transfer.*
 import com.fastdrop.transfer.TransferManager
 import com.fastdrop.transport.ManualLanTransport
 import dev.whyoleg.cryptography.CryptographyProvider
@@ -43,14 +43,11 @@ class TcpIntegrationTest {
             val verif = sec.handshake() as PeerVerification.NewPeer
             sec.confirmPeer(verif)
             
-            var target: String? = null
             transferManager.receiveFile(
                 connection = sec,
                 onOfferReceived = { 
-                    target = "test_out.bin"
-                    true
+                    DesktopIncomingFileDestination(File("test_out.bin"))
                 },
-                fileSink = FileSystem.SYSTEM.sink("test_out.bin".toPath()),
                 onProgress = { _, _ -> }
             )
             transportReceiver.stop()
@@ -65,8 +62,7 @@ class TcpIntegrationTest {
             
             transferManager.sendFile(
                 connection = sec,
-                metadata = FileMetadata("tf1", f.name, f.length()),
-                fileSource = FileSystem.SYSTEM.source(f.absolutePath.toPath()),
+                fileSource = DesktopTransferFileSource(f),
                 onProgress = { _, _ -> }
             )
             sec.close()

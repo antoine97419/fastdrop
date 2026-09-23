@@ -1,17 +1,15 @@
 plugins {
     kotlin("multiplatform")
     kotlin("plugin.serialization")
-    // id("com.android.library")
+    id("com.android.library")
 }
 
 kotlin {
-    // androidTarget {
-    //     compilations.all {
-    //         kotlinOptions {
-    //             jvmTarget = "1.8"
-    //         }
-    //     }
-    // }
+    androidTarget {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
+        }
+    }
     
     jvm("desktop") {
         compilations.all {
@@ -32,6 +30,11 @@ kotlin {
                 // Wait, no, user said "Utilise actuellement : 0.6.0". I must use 0.6.0.
             }
         }
+        val androidMain by getting {
+            dependencies {
+                implementation("dev.whyoleg.cryptography:cryptography-provider-optimal:0.6.0")
+            }
+        }
         val desktopMain by getting {
             dependencies {
                 implementation("org.jmdns:jmdns:3.5.9")
@@ -48,7 +51,6 @@ kotlin {
     }
 }
 
-/*
 android {
     namespace = "com.fastdrop.shared"
     compileSdk = 34
@@ -56,7 +58,6 @@ android {
         minSdk = 24
     }
 }
-*/
 
 tasks.register("printClasspath") {
     doLast {

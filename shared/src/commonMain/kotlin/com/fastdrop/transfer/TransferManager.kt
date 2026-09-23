@@ -108,10 +108,11 @@ class TransferManager(
      */
     suspend fun sendFile(
         connection: Connection, 
-        metadata: FileMetadata, 
-        fileSource: Source,
+        fileSource: TransferFileSource,
         onProgress: (Long, Long) -> Unit = { _, _ -> }
     ): Boolean = withContext(Dispatchers.IO) {
+        val metadata = FileMetadata("transfer_${com.fastdrop.utils.getCurrentTimeMillis()}", fileSource.name, fileSource.size)
+        val source = fileSource.openSource()
         try {
             // 1. Envoyer OFFER
             sendControlMessage(connection, ControlMessage.FileOffer(metadata.id, metadata.name, metadata.size))
@@ -128,7 +129,7 @@ class TransferManager(
             // 3. Envoyer les Chunks
             val buffer = Buffer()
             var offset = 0L
-            val hashingSource = HashingSource.sha256(fileSource)
+            val hashingSource = HashingSource.sha256(source)
             
             while (offset < metadata.size) {
                 val read = hashingSource.read(buffer, chunkSize.toLong())
@@ -166,7 +167,7 @@ class TransferManager(
             } catch (ignored: Exception) {}
             return@withContext false
         } finally {
-            fileSource.close()
+            source.close()
         }
     }
 
@@ -175,13 +176,13 @@ class TransferManager(
      */
     suspend fun receiveFile(
         connection: Connection, 
-        onOfferReceived: suspend (ControlMessage.FileOffer) -> Boolean,
-        fileSink: Sink,
+        onOfferReceived: suspend (ControlMessage.FileOffer) -> IncomingFileDestination?,
         onProgress: (Long, Long) -> Unit = { _, _ -> }
     ): Boolean = withContext(Dispatchers.IO) {
         var hashingSink: HashingSink? = null
         var metadata: ControlMessage.FileOffer? = null
         var fileValid = false
+        var activeDestination: IncomingFileDestination? = null
         
         try {
             // 1. Lire OFFER
@@ -194,15 +195,17 @@ class TransferManager(
             metadata = offerMsg
             
             // 2. Demander à l'utilisateur/app si on accepte
-            val accepted = onOfferReceived(offerMsg)
-            if (!accepted) {
+            val destination = onOfferReceived(offerMsg)
+            if (destination == null) {
                 sendControlMessage(connection, ControlMessage.FileReject(offerMsg.id))
                 return@withContext false
             }
             
             sendControlMessage(connection, ControlMessage.FileAccept(offerMsg.id))
             
-            hashingSink = HashingSink.sha256(fileSink)
+            activeDestination = destination
+            val rawSink = destination.openSink()
+            hashingSink = HashingSink.sha256(rawSink)
             val bufferedSink = hashingSink.buffer()
             
             var receivedBytes = 0L
@@ -267,8 +270,12 @@ class TransferManager(
             }
             return@withContext false
         } finally {
-            fileSink.close()
-            // NB: Le renommage de '.fastdrop-part' est géré par l'appelant car TransferManager utilise un Sink
+            try { hashingSink?.close() } catch(e: Exception) {}
+            if (fileValid) {
+                try { activeDestination?.commit() } catch(e: Exception) {}
+            } else {
+                try { activeDestination?.abort() } catch(e: Exception) {}
+            }
         }
     }
 }
