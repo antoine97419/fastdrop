@@ -23,7 +23,8 @@ enum class SecureChannelState {
 class HandshakeResult(val sas: String)
 
 class SecureChannel(
-    private val rawConnection: Connection
+    private val rawConnection: Connection,
+    private val provider: CryptographyProvider = CryptographyProvider.Default
 ) : Connection {
     override val peer: Peer get() = rawConnection.peer
 
@@ -63,7 +64,7 @@ class SecureChannel(
         return nonce
     }
 
-    suspend fun handshake(provider: CryptographyProvider = CryptographyProvider.Default): HandshakeResult {
+    suspend fun handshake(): HandshakeResult {
         state = SecureChannelState.HANDSHAKING
         try {
             val xdh = provider.get(XDH)

@@ -22,8 +22,8 @@ class SecureChannelTest {
         val (peer1, peer2) = createPeers()
         val (conn1, conn2) = createInMemoryConnectionPair(peer1, peer2)
 
-        val sec1 = SecureChannel(conn1)
-        val sec2 = SecureChannel(conn2)
+        val sec1 = SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
+        val sec2 = SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
 
         val job1 = async(Dispatchers.Default) { sec1.handshake() }
         val job2 = async(Dispatchers.Default) { sec2.handshake() }
@@ -45,15 +45,16 @@ class SecureChannelTest {
         val (peer1, peer2) = createPeers()
         val (conn1, conn2) = createInMemoryConnectionPair(peer1, peer2)
 
-        val sec1 = SecureChannel(conn1)
-        val sec2 = SecureChannel(conn2)
+        val sec1 = SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
+        val sec2 = SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
 
-        async(Dispatchers.Default) {
+        val job = async(Dispatchers.Default) {
             sec1.handshake()
             sec1.confirmPeer()
         }
         sec2.handshake()
         sec2.confirmPeer()
+        job.await()
 
         val dispatcher1 = kotlinx.coroutines.newSingleThreadContext("Peer1")
         val dispatcher2 = kotlinx.coroutines.newSingleThreadContext("Peer2")
@@ -70,6 +71,7 @@ class SecureChannelTest {
         }
         
         val readData = readBuffer.copyOfRange(0, readLen)
+        assertTrue(data.contentEquals(readData))
         assertTrue(data.contentEquals(readData))
     }
 
@@ -100,8 +102,8 @@ class SecureChannelTest {
             override suspend fun close() {}
         }
 
-        val sec1 = SecureChannel(conn1)
-        val sec2 = SecureChannel(conn2)
+        val sec1 = SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
+        val sec2 = SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
 
         val j = async(Dispatchers.Default) {
             sec1.handshake()

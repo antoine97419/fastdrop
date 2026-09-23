@@ -82,8 +82,8 @@ class TransferManagerTest {
         val (peer1, peer2) = createPeers()
         val (conn1, conn2) = createInMemoryConnectionPair(peer1, peer2, maxReadSize = maxReadSize)
         
-        val sec1 = com.fastdrop.security.SecureChannel(conn1)
-        val sec2 = com.fastdrop.security.SecureChannel(conn2)
+        val sec1 = com.fastdrop.security.SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
+        val sec2 = com.fastdrop.security.SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
         
         val metadata = FileMetadata("file_$dataSize", "test.bin", originalData.size.toLong())
         

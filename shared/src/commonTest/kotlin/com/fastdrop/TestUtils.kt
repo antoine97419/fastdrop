@@ -1,5 +1,6 @@
 package com.fastdrop
 
+import dev.whyoleg.cryptography.CryptographyProvider
 import com.fastdrop.core.Peer
 import com.fastdrop.transport.Connection
 import kotlinx.coroutines.channels.Channel
@@ -68,3 +69,6 @@ fun createInMemoryConnectionPair(peer1: Peer, peer2: Peer, maxReadSize: Int = In
     
     return Pair(conn1, conn2)
 }
+
+
+expect fun createTestCryptographyProvider(): CryptographyProvider
