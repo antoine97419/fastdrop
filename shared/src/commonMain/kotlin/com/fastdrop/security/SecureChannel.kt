@@ -2,44 +2,46 @@ package com.fastdrop.security
 
 import com.fastdrop.core.Peer
 import com.fastdrop.transport.Connection
+import dev.whyoleg.cryptography.BinarySize.Companion.bytes
 import dev.whyoleg.cryptography.CryptographyProvider
 import dev.whyoleg.cryptography.DelicateCryptographyApi
-import dev.whyoleg.cryptography.algorithms.XDH
-import dev.whyoleg.cryptography.algorithms.HKDF
 import dev.whyoleg.cryptography.algorithms.ChaCha20Poly1305
+import dev.whyoleg.cryptography.algorithms.HKDF
 import dev.whyoleg.cryptography.algorithms.SHA256
-import dev.whyoleg.cryptography.BinarySize.Companion.bytes
+import dev.whyoleg.cryptography.algorithms.XDH
+import dev.whyoleg.cryptography.algorithms.EdDSA
+import dev.whyoleg.cryptography.operations.IvAuthenticatedCipher
 import kotlin.math.min
+
+private val PROTOCOL_VERSION = "FASTDROP/1".encodeToByteArray()
+private const val MAX_ENCRYPTED_FRAME_SIZE = 10 * 1024 * 1024
 
 enum class SecureChannelState {
     NEW,
     HANDSHAKING,
     WAITING_FOR_SAS_CONFIRMATION,
     ESTABLISHED,
-    FAILED,
-    CLOSED
+    CLOSED,
+    FAILED
 }
-
-class HandshakeResult(val sas: String)
 
 class SecureChannel(
     private val rawConnection: Connection,
+    private val identityStore: IdentityStore,
+    private val trustedPeerStore: TrustedPeerStore,
+    private val deviceInfoProvider: DeviceInfoProvider,
     private val provider: CryptographyProvider = CryptographyProvider.Default
 ) : Connection {
     override val peer: Peer get() = rawConnection.peer
 
-    var state = SecureChannelState.NEW
+    var state: SecureChannelState = SecureChannelState.NEW
         private set
 
     private var writeKey: ChaCha20Poly1305.Key? = null
     private var readKey: ChaCha20Poly1305.Key? = null
-
-    private var writeNonceCounter = 0L
-    private var readNonceCounter = 0L
-
-    private val PROTOCOL_VERSION = "FASTDROP/1".encodeToByteArray()
     
-    private val MAX_ENCRYPTED_FRAME_SIZE = 1024 * 1024 * 2
+    private var writeNonceCounter: Long = 0
+    private var readNonceCounter: Long = 0
 
     private var internalReadBuffer = ByteArray(0)
     private var internalReadOffset = 0
@@ -64,43 +66,87 @@ class SecureChannel(
         return nonce
     }
 
-    suspend fun handshake(): HandshakeResult {
+    suspend fun handshake(): PeerVerification {
         state = SecureChannelState.HANDSHAKING
         try {
+            val myIdentity = identityStore.getOrGenerateIdentity()
+            val myName = deviceInfoProvider.getDeviceName().encodeToByteArray()
+            val myIdPubKeyBytes = myIdentity.keyPair.publicKey.encodeToByteArray(EdDSA.PublicKey.Format.RAW)
+            
             val xdh = provider.get(XDH)
-            val keyPair = xdh.keyPairGenerator(XDH.Curve.X25519).generateKey()
-            val myPubKeyBytes = keyPair.publicKey.encodeToByteArray(XDH.PublicKey.Format.RAW) 
+            val myEphKeyPair = xdh.keyPairGenerator(XDH.Curve.X25519).generateKey()
+            val myEphPubKeyBytes = myEphKeyPair.publicKey.encodeToByteArray(XDH.PublicKey.Format.RAW) 
             
-            val outBuf = ByteArray(PROTOCOL_VERSION.size + myPubKeyBytes.size)
-            PROTOCOL_VERSION.copyInto(outBuf, 0)
-            myPubKeyBytes.copyInto(outBuf, PROTOCOL_VERSION.size)
-            rawConnection.write(outBuf, 0, outBuf.size)
+            val h1 = PROTOCOL_VERSION + 
+                     shortToBytes(myIdPubKeyBytes.size) + myIdPubKeyBytes + 
+                     shortToBytes(myEphPubKeyBytes.size) + myEphPubKeyBytes + 
+                     shortToBytes(myName.size) + myName
+                     
+            val len1 = intToBytes(h1.size)
+            rawConnection.write(len1 + h1, 0, len1.size + h1.size)
             
-            val inBuf = ByteArray(outBuf.size)
-            readExactlyFromRaw(inBuf, outBuf.size)
+            val peerLenBuf = ByteArray(4)
+            readExactlyFromRaw(peerLenBuf, 4)
+            val peerLen = bytesToInt(peerLenBuf)
+            if (peerLen <= 0 || peerLen > 10000) throw IllegalStateException("Invalid handshake frame size")
             
-            val peerVersion = inBuf.copyOfRange(0, PROTOCOL_VERSION.size)
+            val peerH1 = ByteArray(peerLen)
+            readExactlyFromRaw(peerH1, peerLen)
+            
+            var offset = 0
+            val peerVersion = peerH1.copyOfRange(offset, offset + PROTOCOL_VERSION.size)
+            offset += PROTOCOL_VERSION.size
             if (!peerVersion.contentEquals(PROTOCOL_VERSION)) throw IllegalStateException("UNSUPPORTED_VERSION")
             
-            val peerPubKeyBytes = inBuf.copyOfRange(PROTOCOL_VERSION.size, inBuf.size)
-            val peerPubKey = xdh.publicKeyDecoder(XDH.Curve.X25519).decodeFromByteArray(XDH.PublicKey.Format.RAW, peerPubKeyBytes)
-            val sharedSecret = keyPair.privateKey.sharedSecretGenerator().generateSharedSecret(peerPubKey)
+            val peerIdLen = bytesToShort(peerH1, offset); offset += 2
+            val peerIdPubKeyBytes = peerH1.copyOfRange(offset, offset + peerIdLen); offset += peerIdLen
             
-            val isMyKeySmaller = compareByteArrays(myPubKeyBytes, peerPubKeyBytes) < 0
-            val keyA = if (isMyKeySmaller) myPubKeyBytes else peerPubKeyBytes
-            val keyB = if (isMyKeySmaller) peerPubKeyBytes else myPubKeyBytes
+            val peerEphLen = bytesToShort(peerH1, offset); offset += 2
+            val peerEphPubKeyBytes = peerH1.copyOfRange(offset, offset + peerEphLen); offset += peerEphLen
             
-            val transcriptData = PROTOCOL_VERSION + keyA + keyB
+            val peerNameLen = bytesToShort(peerH1, offset); offset += 2
+            val peerNameBytes = peerH1.copyOfRange(offset, offset + peerNameLen); offset += peerNameLen
+            val peerNameStr = peerNameBytes.decodeToString()
+            
+            val peerIdPubKey = provider.get(EdDSA).publicKeyDecoder(EdDSA.Curve.Ed25519).decodeFromByteArray(EdDSA.PublicKey.Format.RAW, peerIdPubKeyBytes)
+            val peerEphPubKey = xdh.publicKeyDecoder(XDH.Curve.X25519).decodeFromByteArray(XDH.PublicKey.Format.RAW, peerEphPubKeyBytes)
+            val sharedSecret = myEphKeyPair.privateKey.sharedSecretGenerator().generateSharedSecret(peerEphPubKey)
+            
+            val isMyKeySmaller = compareByteArrays(myEphPubKeyBytes, peerEphPubKeyBytes) < 0
+            
+            val idA = if (isMyKeySmaller) myIdPubKeyBytes else peerIdPubKeyBytes
+            val idB = if (isMyKeySmaller) peerIdPubKeyBytes else myIdPubKeyBytes
+            val ephA = if (isMyKeySmaller) myEphPubKeyBytes else peerEphPubKeyBytes
+            val ephB = if (isMyKeySmaller) peerEphPubKeyBytes else myEphPubKeyBytes
+            
+            val transcriptData = PROTOCOL_VERSION + 
+                intToBytes(idA.size) + idA + 
+                intToBytes(idB.size) + idB +
+                intToBytes(ephA.size) + ephA + 
+                intToBytes(ephB.size) + ephB
+                
             val transcriptHash = provider.get(SHA256).hasher().hash(transcriptData)
             
-            val hkdf = provider.get(HKDF)
+            // Sign the transcript
+            val mySignature = myIdentity.keyPair.privateKey.signatureGenerator().generateSignature(transcriptHash)
+            val sigLenBytes = shortToBytes(mySignature.size)
+            rawConnection.write(sigLenBytes + mySignature, 0, sigLenBytes.size + mySignature.size)
             
+            val peerSigLenBuf = ByteArray(2)
+            readExactlyFromRaw(peerSigLenBuf, 2)
+            val peerSigLen = bytesToShort(peerSigLenBuf)
+            if (peerSigLen <= 0 || peerSigLen > 2000) throw IllegalStateException("Invalid signature size")
+            
+            val peerSignature = ByteArray(peerSigLen)
+            readExactlyFromRaw(peerSignature, peerSigLen)
+            
+            peerIdPubKey.signatureVerifier().verifySignature(transcriptHash, peerSignature)
+            
+            val hkdf = provider.get(HKDF)
             val hkdfDeriveAtoB = hkdf.secretDerivation(SHA256, outputSize = 32.bytes, salt = transcriptHash, info = "fastdrop-v1/a-to-b".encodeToByteArray())
             val keyAToBBytes = hkdfDeriveAtoB.deriveSecretToByteArray(sharedSecret)
-            
             val hkdfDeriveBtoA = hkdf.secretDerivation(SHA256, outputSize = 32.bytes, salt = transcriptHash, info = "fastdrop-v1/b-to-a".encodeToByteArray())
             val keyBToABytes = hkdfDeriveBtoA.deriveSecretToByteArray(sharedSecret)
-            
             val hkdfDeriveSas = hkdf.secretDerivation(SHA256, outputSize = 4.bytes, salt = transcriptHash, info = "fastdrop-v1/sas".encodeToByteArray())
             val sasBytes = hkdfDeriveSas.deriveSecretToByteArray(sharedSecret)
             
@@ -119,8 +165,17 @@ class SecureChannel(
             val sasCode = (sasNumber and 0x7FFFFFFF) % 1_000_000
             val sasString = sasCode.toString().padStart(6, '0')
             
+            val peerDeviceId = calculateFingerprint(peerIdPubKeyBytes, provider)
+            val knownPeer = trustedPeerStore.getPeer(peerDeviceId)
+            
+            if (knownPeer != null && knownPeer.publicKey.contentEquals(peerIdPubKeyBytes)) {
+                state = SecureChannelState.ESTABLISHED
+                trustedPeerStore.savePeer(knownPeer.copy(lastSeen = com.fastdrop.utils.getCurrentTimeMillis()))
+                return PeerVerification.TrustedPeer(peerDeviceId, peerNameStr, peerIdPubKeyBytes)
+            }
+            
             state = SecureChannelState.WAITING_FOR_SAS_CONFIRMATION
-            return HandshakeResult(sasString)
+            return PeerVerification.NewPeer(peerDeviceId, peerNameStr, peerDeviceId, sasString, peerIdPubKeyBytes)
             
         } catch (e: Exception) {
             state = SecureChannelState.FAILED
@@ -129,7 +184,21 @@ class SecureChannel(
         }
     }
 
-    fun confirmPeer() {
+    suspend fun confirmPeer(verification: PeerVerification.NewPeer) {
+        if (state == SecureChannelState.WAITING_FOR_SAS_CONFIRMATION) {
+            val peer = TrustedPeer(
+                deviceId = verification.deviceId,
+                publicKey = verification.publicKeyRaw,
+                friendlyName = verification.friendlyName,
+                firstSeen = com.fastdrop.utils.getCurrentTimeMillis(),
+                lastSeen = com.fastdrop.utils.getCurrentTimeMillis()
+            )
+            trustedPeerStore.savePeer(peer)
+            state = SecureChannelState.ESTABLISHED
+        }
+    }
+    
+    suspend fun confirmPeer() {
         if (state == SecureChannelState.WAITING_FOR_SAS_CONFIRMATION) {
             state = SecureChannelState.ESTABLISHED
         }
@@ -161,10 +230,7 @@ class SecureChannel(
         try {
             val lenBytes = ByteArray(4)
             readExactlyFromRaw(lenBytes, 4)
-            val encryptedLen = ((lenBytes[0].toInt() and 0xFF) shl 24) or
-                               ((lenBytes[1].toInt() and 0xFF) shl 16) or
-                               ((lenBytes[2].toInt() and 0xFF) shl 8) or
-                               (lenBytes[3].toInt() and 0xFF)
+            val encryptedLen = bytesToInt(lenBytes)
             
             if (encryptedLen <= 0 || encryptedLen > MAX_ENCRYPTED_FRAME_SIZE) {
                 throw IllegalArgumentException("Invalid encrypted frame size: $encryptedLen")
@@ -203,11 +269,7 @@ class SecureChannel(
             
             val expectedCipherLen = plaintext.size + 16
             
-            val lenBytes = ByteArray(4)
-            lenBytes[0] = (expectedCipherLen shr 24).toByte()
-            lenBytes[1] = (expectedCipherLen shr 16).toByte()
-            lenBytes[2] = (expectedCipherLen shr 8).toByte()
-            lenBytes[3] = expectedCipherLen.toByte()
+            val lenBytes = intToBytes(expectedCipherLen)
 
             val ciphertext = cipher.encryptWithIv(nonce, plaintext, lenBytes)
             

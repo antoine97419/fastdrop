@@ -4,6 +4,11 @@ import com.fastdrop.core.Peer
 import com.fastdrop.core.TransportType
 import com.fastdrop.transfer.FileMetadata
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.security.FileIdentityStore
+import com.fastdrop.security.FileTrustedPeerStore
+import com.fastdrop.security.DesktopDeviceInfoProvider
+import com.fastdrop.security.PeerVerification
+import com.fastdrop.security.SecureChannel
 import com.fastdrop.transport.ManualLanTransport
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -27,6 +32,9 @@ fun main(): Unit = runBlocking {
     
     val transport = ManualLanTransport(47832)
     val transferManager = TransferManager()
+    val identityStore = FileIdentityStore(File(System.getProperty("user.home"), ".fastdrop/identity.json"))
+    val trustedPeerStore = FileTrustedPeerStore(File(System.getProperty("user.home"), ".fastdrop/trusted_peers.json"))
+    val deviceInfoProvider = DesktopDeviceInfoProvider()
     
     when (choice) {
         "1" -> {
@@ -35,22 +43,32 @@ fun main(): Unit = runBlocking {
             val rawConnection = connectionFlow.first()
             println("Connected by ${rawConnection.peer.address}")
             
-            val secureChannel = com.fastdrop.security.SecureChannel(rawConnection)
-            println("Performing secure handshake...")
-            val handshake = secureChannel.handshake()
+            val secureChannel = SecureChannel(rawConnection, identityStore, trustedPeerStore, deviceInfoProvider)
+            println("Authenticating device...")
+            val verification = secureChannel.handshake()
             
-            println("=====================================")
-            println(" SECURITY CODE: ${handshake.sas}")
-            println("=====================================")
-            print("Does the other device display the same code? [y/N] ")
-            val confirm = scanner.nextLine().trim()
-            if (confirm.equals("y", ignoreCase = true)) {
-                secureChannel.confirmPeer()
-                println("Secure channel established.")
-            } else {
-                println("ABORT: Connection refused.")
-                secureChannel.close()
-                exitProcess(1)
+            when (verification) {
+                is PeerVerification.TrustedPeer -> {
+                    println("Trusted device:\n${verification.friendlyName} ✓")
+                    println("Secure connection established.")
+                }
+                is PeerVerification.NewPeer -> {
+                    println("New device detected:\n${verification.friendlyName}")
+                    println("Fingerprint:\n${verification.fingerprint}")
+                    println("=====================================")
+                    println(" SECURITY CODE: ${verification.sas}")
+                    println("=====================================")
+                    print("Codes match and trust this device? [y/N] ")
+                    val confirm = scanner.nextLine().trim()
+                    if (confirm.equals("y", ignoreCase = true)) {
+                        secureChannel.confirmPeer(verification)
+                        println("Secure channel established.")
+                    } else {
+                        println("ABORT: Connection refused.")
+                        secureChannel.close()
+                        exitProcess(1)
+                    }
+                }
             }
             
             var targetFile: String? = null
@@ -102,22 +120,32 @@ fun main(): Unit = runBlocking {
                 val rawConnection = transport.connect(peer)
                 println("Connected.")
                 
-                val secureChannel = com.fastdrop.security.SecureChannel(rawConnection)
-                println("Performing secure handshake...")
-                val handshake = secureChannel.handshake()
+                val secureChannel = SecureChannel(rawConnection, identityStore, trustedPeerStore, deviceInfoProvider)
+                println("Authenticating device...")
+                val verification = secureChannel.handshake()
                 
-                println("=====================================")
-                println(" SECURITY CODE: ${handshake.sas}")
-                println("=====================================")
-                print("Does the other device display the same code? [y/N] ")
-                val confirm = scanner.nextLine().trim()
-                if (confirm.equals("y", ignoreCase = true)) {
-                    secureChannel.confirmPeer()
-                    println("Secure channel established.")
-                } else {
-                    println("ABORT: Connection refused.")
-                    secureChannel.close()
-                    exitProcess(1)
+                when (verification) {
+                    is PeerVerification.TrustedPeer -> {
+                        println("Trusted device:\n${verification.friendlyName} ✓")
+                        println("Secure connection established.")
+                    }
+                    is PeerVerification.NewPeer -> {
+                        println("New device detected:\n${verification.friendlyName}")
+                        println("Fingerprint:\n${verification.fingerprint}")
+                        println("=====================================")
+                        println(" SECURITY CODE: ${verification.sas}")
+                        println("=====================================")
+                        print("Codes match and trust this device? [y/N] ")
+                        val confirm = scanner.nextLine().trim()
+                        if (confirm.equals("y", ignoreCase = true)) {
+                            secureChannel.confirmPeer(verification)
+                            println("Secure channel established.")
+                        } else {
+                            println("ABORT: Connection refused.")
+                            secureChannel.close()
+                            exitProcess(1)
+                        }
+                    }
                 }
                 
                 val metadata = FileMetadata("transfer_${System.currentTimeMillis()}", file.name, file.length())

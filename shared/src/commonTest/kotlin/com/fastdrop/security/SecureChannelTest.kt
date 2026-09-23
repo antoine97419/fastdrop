@@ -22,19 +22,21 @@ class SecureChannelTest {
         val (peer1, peer2) = createPeers()
         val (conn1, conn2) = createInMemoryConnectionPair(peer1, peer2)
 
-        val sec1 = SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
-        val sec2 = SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
+        val p1 = com.fastdrop.createTestCryptographyProvider()
+        val sec1 = SecureChannel(conn1, TestIdentityStore(p1), TestTrustedPeerStore(), TestDeviceInfoProvider("A"), p1)
+        val p2 = com.fastdrop.createTestCryptographyProvider()
+        val sec2 = SecureChannel(conn2, TestIdentityStore(p2), TestTrustedPeerStore(), TestDeviceInfoProvider("B"), p2)
 
         val job1 = async(Dispatchers.Default) { sec1.handshake() }
         val job2 = async(Dispatchers.Default) { sec2.handshake() }
 
-        val res1 = job1.await()
-        val res2 = job2.await()
+        val res1 = job1.await() as PeerVerification.NewPeer
+        val res2 = job2.await() as PeerVerification.NewPeer
 
         assertEquals(res1.sas, res2.sas)
 
-        sec1.confirmPeer()
-        sec2.confirmPeer()
+        sec1.confirmPeer(res1)
+        sec2.confirmPeer(res2)
 
         assertEquals(SecureChannelState.ESTABLISHED, sec1.state)
         assertEquals(SecureChannelState.ESTABLISHED, sec2.state)
@@ -45,15 +47,17 @@ class SecureChannelTest {
         val (peer1, peer2) = createPeers()
         val (conn1, conn2) = createInMemoryConnectionPair(peer1, peer2)
 
-        val sec1 = SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
-        val sec2 = SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
+        val p1 = com.fastdrop.createTestCryptographyProvider()
+        val sec1 = SecureChannel(conn1, TestIdentityStore(p1), TestTrustedPeerStore(), TestDeviceInfoProvider("A"), p1)
+        val p2 = com.fastdrop.createTestCryptographyProvider()
+        val sec2 = SecureChannel(conn2, TestIdentityStore(p2), TestTrustedPeerStore(), TestDeviceInfoProvider("B"), p2)
 
         val job = async(Dispatchers.Default) {
-            sec1.handshake()
-            sec1.confirmPeer()
+            val res1 = sec1.handshake() as PeerVerification.NewPeer
+            sec1.confirmPeer(res1)
         }
-        sec2.handshake()
-        sec2.confirmPeer()
+        val res2 = sec2.handshake() as PeerVerification.NewPeer
+        sec2.confirmPeer(res2)
         job.await()
 
         val dispatcher1 = kotlinx.coroutines.newSingleThreadContext("Peer1")
@@ -81,11 +85,12 @@ class SecureChannelTest {
         val stream1 = com.fastdrop.InMemoryStream()
         val stream2 = com.fastdrop.InMemoryStream()
         
+        var corruptEnabled = false
         val conn1 = object : com.fastdrop.transport.Connection {
             override val peer = peer2
             override suspend fun read(buffer: ByteArray) = stream2.read(buffer)
             override suspend fun write(data: ByteArray, offset: Int, length: Int) {
-                if (length > 40) {
+                if (corruptEnabled && length > 10) {
                     val corrupted = data.copyOfRange(offset, offset + length)
                     corrupted[length - 1] = (corrupted[length - 1] + 1).toByte()
                     stream1.write(corrupted, 0, length)
@@ -102,16 +107,19 @@ class SecureChannelTest {
             override suspend fun close() {}
         }
 
-        val sec1 = SecureChannel(conn1, com.fastdrop.createTestCryptographyProvider())
-        val sec2 = SecureChannel(conn2, com.fastdrop.createTestCryptographyProvider())
+        val p1 = com.fastdrop.createTestCryptographyProvider()
+        val sec1 = SecureChannel(conn1, TestIdentityStore(p1), TestTrustedPeerStore(), TestDeviceInfoProvider("A"), p1)
+        val p2 = com.fastdrop.createTestCryptographyProvider()
+        val sec2 = SecureChannel(conn2, TestIdentityStore(p2), TestTrustedPeerStore(), TestDeviceInfoProvider("B"), p2)
 
         val j = async(Dispatchers.Default) {
-            sec1.handshake()
-            sec1.confirmPeer()
+            val res1 = sec1.handshake() as PeerVerification.NewPeer
+            sec1.confirmPeer(res1)
+            corruptEnabled = true
             sec1.write("Hello".encodeToByteArray(), 0, 5)
         }
-        sec2.handshake()
-        sec2.confirmPeer()
+        val res2 = sec2.handshake() as PeerVerification.NewPeer
+        sec2.confirmPeer(res2)
         
         val buf = ByteArray(100)
         try {
