@@ -55,14 +55,19 @@ class SecureChannelTest {
         sec2.handshake()
         sec2.confirmPeer()
 
+        val dispatcher1 = kotlinx.coroutines.newSingleThreadContext("Peer1")
+        val dispatcher2 = kotlinx.coroutines.newSingleThreadContext("Peer2")
+
         val data = "hello FastDrop".encodeToByteArray()
         
-        async(Dispatchers.Default) {
+        async(dispatcher1) {
             sec1.write(data, 0, data.size)
         }
         
         val readBuffer = ByteArray(1024)
-        val readLen = sec2.read(readBuffer)
+        val readLen = kotlinx.coroutines.withContext(dispatcher2) {
+            sec2.read(readBuffer)
+        }
         
         val readData = readBuffer.copyOfRange(0, readLen)
         assertTrue(data.contentEquals(readData))
