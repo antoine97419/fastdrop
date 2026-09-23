@@ -84,17 +84,25 @@ Le protocole est versionné et conçu pour être indépendant du transport physi
 *   `Length` (4 octets - Entier Big-Endian) : Taille de la charge utile (Payload)
 *   `Payload` (Taille variable) : Contenu du message
 
+**Sécurité du Framing :**
+*   Taille maximale stricte : 64 KiB pour une trame de contrôle, et [Taille Max Chunk] pour une trame de données.
+*   Rejet immédiat en cas de longueur négative, invalide ou type de trame inconnu.
+*   Protection contre la fragmentation TCP : le protocole reconstruit méticuleusement les trames (via une lecture stricte des octets requis).
+
 **Messages :**
-1.  `FILE_OFFER(id, name, size, hash)` -> Proposition d'envoi.
+1.  `FILE_OFFER(id, name, size)` -> Proposition d'envoi. Le SHA-256 complet n'est **pas** inclus pour permettre le hachage à la volée de très gros fichiers (plusieurs Go).
 2.  `FILE_ACCEPT(id)` -> Le receveur accepte le transfert.
 3.  `FILE_REJECT(id)` -> Le receveur refuse le transfert.
 4.  `CHUNK(offset, data)` -> Morceau de fichier.
     *   Payload = `[8 octets Offset] + [Données brutes]`.
-    *   Taille configurable (ex: 256 KiB - 1 MiB).
 5.  `CANCEL(id, reason)` -> Annulation explicite du transfert en cours.
-6.  `COMPLETE(id, hash)` -> L'émetteur a fini d'envoyer, transmet le hash SHA-256 complet.
-7.  `SUCCESS(id)` -> Le receveur valide le hash et confirme.
-8.  `ERROR(id, message)` -> Erreur lors du transfert.
+6.  `COMPLETE(id, hash)` -> L'émetteur a fini d'envoyer (EOF) et transmet le hash SHA-256 final calculé à la volée.
+7.  `SUCCESS(id)` -> Le receveur valide le hash final.
+8.  `HASH_MISMATCH(id)` -> Erreur d'intégrité (hash final différent).
+9.  `ERROR(id, message)` -> Autre erreur réseau ou I/O.
+
+**Réception Sûre :**
+Les fichiers sont reçus avec un suffixe temporaire (`.fastdrop-part`). Le renommage n'a lieu qu'après la validation du hash final (message `COMPLETE`). Les noms de fichiers sont purgés de toute tentative de Path Traversal (ex: rejet de `../`).
 
 ## 7. Stratégie de Sécurité
 

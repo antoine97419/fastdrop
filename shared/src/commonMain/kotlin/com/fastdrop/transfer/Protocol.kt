@@ -9,7 +9,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 sealed class ControlMessage {
     @Serializable
-    data class FileOffer(val id: String, val name: String, val size: Long, val hash: String) : ControlMessage()
+    data class FileOffer(val id: String, val name: String, val size: Long) : ControlMessage()
     
     @Serializable
     data class FileAccept(val id: String) : ControlMessage()
@@ -25,6 +25,9 @@ sealed class ControlMessage {
     
     @Serializable
     data class Success(val id: String) : ControlMessage()
+    
+    @Serializable
+    data class HashMismatch(val id: String) : ControlMessage()
     
     @Serializable
     data class Error(val id: String, val message: String) : ControlMessage()

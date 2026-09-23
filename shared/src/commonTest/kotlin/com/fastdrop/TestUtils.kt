@@ -10,7 +10,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import okio.Buffer
 
-class InMemoryStream {
+class InMemoryStream(private val maxReadSize: Int = Int.MAX_VALUE) {
     private val buffer = Buffer()
     private val mutex = Mutex()
     private var isClosed = false
@@ -26,12 +26,14 @@ class InMemoryStream {
         while (true) {
             mutex.withLock {
                 if (buffer.size > 0) {
-                    val read = buffer.read(outBuffer)
+                    // Simule la fragmentation TCP en limitant la lecture
+                    val limit = minOf(outBuffer.size.toLong(), maxReadSize.toLong(), buffer.size)
+                    val read = buffer.read(outBuffer, 0, limit.toInt())
                     return read
                 }
                 if (isClosed) return -1
             }
-            delay(10) // Polling très basique
+            delay(5)
         }
     }
     
@@ -40,9 +42,9 @@ class InMemoryStream {
     }
 }
 
-fun createInMemoryConnectionPair(peer1: Peer, peer2: Peer): Pair<Connection, Connection> {
-    val stream1to2 = InMemoryStream()
-    val stream2to1 = InMemoryStream()
+fun createInMemoryConnectionPair(peer1: Peer, peer2: Peer, maxReadSize: Int = Int.MAX_VALUE): Pair<Connection, Connection> {
+    val stream1to2 = InMemoryStream(maxReadSize)
+    val stream2to1 = InMemoryStream(maxReadSize)
     
     val conn1 = object : Connection {
         override val peer = peer2

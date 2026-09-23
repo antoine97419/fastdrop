@@ -2,6 +2,7 @@ plugins {
     kotlin("multiplatform")
     kotlin("plugin.serialization")
     id("com.android.library")
+    application
 }
 
 kotlin {
@@ -41,4 +42,8 @@ android {
     defaultConfig {
         minSdk = 24
     }
+}
+
+application {
+    mainClass.set("com.fastdrop.MainKt")
 }

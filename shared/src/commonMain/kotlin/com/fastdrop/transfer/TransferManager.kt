@@ -22,8 +22,7 @@ import okio.buffer
 data class FileMetadata(
     val id: String,
     val name: String,
-    val size: Long,
-    val hash: String // Hash SHA-256 pour vérifier l'intégrité
+    val size: Long
 )
 
 /**
@@ -33,6 +32,8 @@ class TransferManager(
     private val chunkSize: Int = 1024 * 1024 // 1 MiB par défaut
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+    private val MAX_CONTROL_SIZE = 64 * 1024 // 64 KiB
+    private val MAX_CHUNK_SIZE = chunkSize + 8
 
     /**
      * Lit une trame complète depuis la connexion.
@@ -41,13 +42,26 @@ class TransferManager(
         val typeBytes = connection.readExactly(1) ?: return null
         val type = typeBytes[0]
         
+        if (type != FrameType.CONTROL_MESSAGE && type != FrameType.CHUNK) {
+            throw IllegalStateException("Type de trame inconnu: $type")
+        }
+        
         val lengthBytes = connection.readExactly(4) ?: return null
         val length = (lengthBytes[0].toInt() and 0xFF shl 24) or
                      (lengthBytes[1].toInt() and 0xFF shl 16) or
                      (lengthBytes[2].toInt() and 0xFF shl 8) or
                      (lengthBytes[3].toInt() and 0xFF)
                      
-        if (length < 0) return null
+        if (length < 0) {
+            throw IllegalStateException("Longueur de trame négative invalide")
+        }
+        
+        if (type == FrameType.CONTROL_MESSAGE && length > MAX_CONTROL_SIZE) {
+            throw IllegalStateException("Trame de contrôle trop grande")
+        }
+        if (type == FrameType.CHUNK && length > MAX_CHUNK_SIZE) {
+            throw IllegalStateException("Trame de chunk trop grande")
+        }
         
         val payload = if (length > 0) {
             connection.readExactly(length) ?: return null
@@ -82,6 +96,13 @@ class TransferManager(
     }
 
     /**
+     * Nettoie le nom de fichier contre le path traversal.
+     */
+    fun sanitizeFilename(filename: String): String {
+        return filename.replace("\\", "/").split("/").lastOrNull { it.isNotBlank() } ?: "unknown_file"
+    }
+
+    /**
      * Propose et envoie un fichier.
      * @param onProgress Callback pour la progression (bytes sent, total bytes).
      */
@@ -93,7 +114,7 @@ class TransferManager(
     ): Boolean = withContext(Dispatchers.IO) {
         try {
             // 1. Envoyer OFFER
-            sendControlMessage(connection, ControlMessage.FileOffer(metadata.id, metadata.name, metadata.size, metadata.hash))
+            sendControlMessage(connection, ControlMessage.FileOffer(metadata.id, metadata.name, metadata.size))
             
             // 2. Attendre ACCEPT ou REJECT
             val responseFrame = readFrame(connection) ?: return@withContext false
@@ -123,7 +144,7 @@ class TransferManager(
                 chunkData.copyInto(chunkPayload, 8)
                 
                 writeFrame(connection, FrameType.CHUNK, chunkPayload)
-                offset += read
+                offset += chunkData.size
                 
                 onProgress(offset, metadata.size)
             }
@@ -160,6 +181,7 @@ class TransferManager(
     ): Boolean = withContext(Dispatchers.IO) {
         var hashingSink: HashingSink? = null
         var metadata: ControlMessage.FileOffer? = null
+        var fileValid = false
         
         try {
             // 1. Lire OFFER
@@ -195,7 +217,7 @@ class TransferManager(
                         return@withContext false
                     }
                     if (msg is ControlMessage.Complete) {
-                        // Le transfert a fini plus tôt que prévu ou on a reçu COMPLETE
+                        // EOF anticipé, vérifier si on a tout reçu (on gère ça après)
                         break
                     }
                 } else if (frame.first == FrameType.CHUNK) {
@@ -209,8 +231,6 @@ class TransferManager(
                     
                     val chunkData = payload.copyOfRange(8, payload.size)
                     
-                    // Note: Dans une implémentation robuste, il faudrait gérer l'offset (reprise), 
-                    // ici on suppose une écriture séquentielle.
                     bufferedSink.write(chunkData)
                     bufferedSink.emit() // flush au sink sous-jacent
                     
@@ -228,14 +248,14 @@ class TransferManager(
             val completeMsg = json.decodeFromString<ControlMessage>(completeFrame.second.decodeToString())
             if (completeMsg !is ControlMessage.Complete) return@withContext false
             
-            // 5. Valider le hash
+            // 5. Valider la taille et le hash
             val computedHash = hashingSink.hash.hex()
-            if (computedHash.equals(completeMsg.hash, ignoreCase = true) && 
-                computedHash.equals(metadata.hash, ignoreCase = true)) {
+            if (receivedBytes == offerMsg.size && computedHash.equals(completeMsg.hash, ignoreCase = true)) {
                 sendControlMessage(connection, ControlMessage.Success(metadata.id))
+                fileValid = true
                 return@withContext true
             } else {
-                sendControlMessage(connection, ControlMessage.Error(metadata.id, "Hash mismatch"))
+                sendControlMessage(connection, ControlMessage.HashMismatch(metadata.id))
                 return@withContext false
             }
             
@@ -248,6 +268,7 @@ class TransferManager(
             return@withContext false
         } finally {
             fileSink.close()
+            // NB: Le renommage de '.fastdrop-part' est géré par l'appelant car TransferManager utilise un Sink
         }
     }
 }
