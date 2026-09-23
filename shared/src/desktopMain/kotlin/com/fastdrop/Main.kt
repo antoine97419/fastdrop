@@ -30,15 +30,16 @@ fun main(): Unit = runBlocking {
     val scanner = Scanner(System.`in`)
     val choice = scanner.nextLine().trim()
     
-    val transport = ManualLanTransport(47832)
+    val transport = ManualLanTransport(FastDropConfig.DEFAULT_PORT)
     val transferManager = TransferManager()
-    val identityStore = FileIdentityStore(File(System.getProperty("user.home"), ".fastdrop/identity.json"))
-    val trustedPeerStore = FileTrustedPeerStore(File(System.getProperty("user.home"), ".fastdrop/trusted_peers.json"))
+    val homeDir = System.getProperty("fastdrop.home", System.getProperty("user.home") + "/.fastdrop")
+    val identityStore = FileIdentityStore(File(homeDir, "identity.json"))
+    val trustedPeerStore = FileTrustedPeerStore(File(homeDir, "trusted_peers.json"))
     val deviceInfoProvider = DesktopDeviceInfoProvider()
     
     when (choice) {
         "1" -> {
-            println("Listening on port 47832...")
+            println("Listening on port FastDropConfig.DEFAULT_PORT...")
             val connectionFlow = transport.startHosting()
             val rawConnection = connectionFlow.first()
             println("Connected by ${rawConnection.peer.address}")
@@ -114,7 +115,7 @@ fun main(): Unit = runBlocking {
             }
             
             val peer = Peer(id = ip, name = "Target", transportType = TransportType.LAN, address = ip)
-            println("Connecting to $ip:47832...")
+            println("Connecting to $ip:FastDropConfig.DEFAULT_PORT...")
             
             try {
                 val rawConnection = transport.connect(peer)

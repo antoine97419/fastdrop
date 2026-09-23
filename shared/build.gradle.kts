@@ -56,3 +56,10 @@ android {
     }
 }
 */
+
+tasks.register("printClasspath") {
+    doLast {
+        val cp = configurations.getByName("desktopRuntimeClasspath").files.joinToString(":")
+        println(cp)
+    }
+}
