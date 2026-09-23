@@ -16,7 +16,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import kotlin.math.roundToInt
 
-fun main() = runBlocking {
+fun main(): Unit = runBlocking {
     println("FastDrop TCP Demo")
     println("1. Listen (Receiver)")
     println("2. Connect (Sender)")
@@ -32,14 +32,32 @@ fun main() = runBlocking {
         "1" -> {
             println("Listening on port 47832...")
             val connectionFlow = transport.startHosting()
-            val connection = connectionFlow.first()
-            println("Connected by ${connection.peer.address}")
+            val rawConnection = connectionFlow.first()
+            println("Connected by ${rawConnection.peer.address}")
+            
+            val secureChannel = com.fastdrop.security.SecureChannel(rawConnection)
+            println("Performing secure handshake...")
+            val handshake = secureChannel.handshake()
+            
+            println("=====================================")
+            println(" SECURITY CODE: ${handshake.sas}")
+            println("=====================================")
+            print("Does the other device display the same code? [y/N] ")
+            val confirm = scanner.nextLine().trim()
+            if (confirm.equals("y", ignoreCase = true)) {
+                secureChannel.confirmPeer()
+                println("Secure channel established.")
+            } else {
+                println("ABORT: Connection refused.")
+                secureChannel.close()
+                exitProcess(1)
+            }
             
             var targetFile: String? = null
             var tempFile: String? = null
             
             val success = transferManager.receiveFile(
-                connection = connection,
+                connection = secureChannel,
                 onOfferReceived = { offer ->
                     println("Incoming file: ${offer.name} (${offer.size / 1024 / 1024} MB)")
                     val safeName = transferManager.sanitizeFilename(offer.name)
@@ -81,8 +99,26 @@ fun main() = runBlocking {
             println("Connecting to $ip:47832...")
             
             try {
-                val connection = transport.connect(peer)
+                val rawConnection = transport.connect(peer)
                 println("Connected.")
+                
+                val secureChannel = com.fastdrop.security.SecureChannel(rawConnection)
+                println("Performing secure handshake...")
+                val handshake = secureChannel.handshake()
+                
+                println("=====================================")
+                println(" SECURITY CODE: ${handshake.sas}")
+                println("=====================================")
+                print("Does the other device display the same code? [y/N] ")
+                val confirm = scanner.nextLine().trim()
+                if (confirm.equals("y", ignoreCase = true)) {
+                    secureChannel.confirmPeer()
+                    println("Secure channel established.")
+                } else {
+                    println("ABORT: Connection refused.")
+                    secureChannel.close()
+                    exitProcess(1)
+                }
                 
                 val metadata = FileMetadata("transfer_${System.currentTimeMillis()}", file.name, file.length())
                 
@@ -91,7 +127,7 @@ fun main() = runBlocking {
                 var lastBytes = 0L
                 
                 val success = transferManager.sendFile(
-                    connection = connection,
+                    connection = secureChannel,
                     metadata = metadata,
                     fileSource = FileSystem.SYSTEM.source(file.toOkioPath()),
                     onProgress = { current, total ->
@@ -113,7 +149,7 @@ fun main() = runBlocking {
                     println("Transfer failed!")
                 }
                 
-                connection.close()
+                secureChannel.close()
             } catch (e: Exception) {
                 println("Connection failed: ${e.message}")
             }

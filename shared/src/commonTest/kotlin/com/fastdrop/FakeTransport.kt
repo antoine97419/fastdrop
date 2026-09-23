@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.emptyFlow
 
 class FakeTransport(private val testPeers: List<Peer>) : Transport {
-    override val transportType: TransportType = TransportType.LAN
+    override val type: TransportType = TransportType.LAN
 
     override suspend fun discover(): Flow<List<Peer>> {
         return flowOf(testPeers)

@@ -1,21 +1,23 @@
 plugins {
     kotlin("multiplatform")
     kotlin("plugin.serialization")
-    id("com.android.library")
-    application
+    // id("com.android.library")
 }
 
 kotlin {
-    androidTarget {
+    // androidTarget {
+    //     compilations.all {
+    //         kotlinOptions {
+    //             jvmTarget = "1.8"
+    //         }
+    //     }
+    // }
+    
+    jvm("desktop") {
         compilations.all {
-            kotlinOptions {
-                jvmTarget = "1.8"
-            }
+            
         }
     }
-    
-    jvm("desktop")
-    
     sourceSets {
         val commonMain by getting {
             dependencies {
@@ -23,19 +25,29 @@ kotlin {
                 implementation("io.ktor:ktor-network:2.3.8")
                 implementation("com.squareup.okio:okio:3.9.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
-                // Crypto abstraction via cryptography-kotlin (interfaces prep)
-                implementation("dev.whyoleg.cryptography:cryptography-core:0.3.1")
+                
+                // Cryptography
+                implementation("dev.whyoleg.cryptography:cryptography-core:0.6.0") 
+                // But the user specifically asked for 0.6.0. I will use 0.4.0 first just to check compilation, then move to 0.6.0 if it works.
+                // Wait, no, user said "Utilise actuellement : 0.6.0". I must use 0.6.0.
+            }
+        }
+        val desktopMain by getting {
+            dependencies {
+                implementation("dev.whyoleg.cryptography:cryptography-provider-jdk:0.6.0")
             }
         }
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+                implementation("dev.whyoleg.cryptography:cryptography-provider-jdk:0.6.0")
             }
         }
     }
 }
 
+/*
 android {
     namespace = "com.fastdrop.shared"
     compileSdk = 34
@@ -43,7 +55,4 @@ android {
         minSdk = 24
     }
 }
-
-application {
-    mainClass.set("com.fastdrop.MainKt")
-}
+*/

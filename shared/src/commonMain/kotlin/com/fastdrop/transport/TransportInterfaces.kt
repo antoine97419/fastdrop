@@ -23,6 +23,7 @@ interface Connection {
  * Abstraction pour un type de réseau (LAN, Wi-Fi Direct, etc.)
  */
 interface Transport {
+    val type: com.fastdrop.core.TransportType
     /** Découvre les appareils disponibles sur ce transport */
     suspend fun discover(): Flow<List<Peer>>
     

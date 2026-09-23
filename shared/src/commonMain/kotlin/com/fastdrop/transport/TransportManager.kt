@@ -31,7 +31,7 @@ class TransportManager(
      * Politique : LAN > WiFi Direct > BLE
      */
     suspend fun connectTo(peer: Peer): Connection {
-        val transport = transports.find { it.transportType == peer.transportType }
+        val transport = transports.find { it.type == peer.transportType }
             ?: throw IllegalStateException("Transport non supporté pour ce Peer")
             
         return transport.connect(peer)

@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.emptyFlow
  * Ne gère pas la découverte automatique.
  */
 class ManualLanTransport(port: Int = 47832) : AbstractLanTransport(port) {
+    override val type = com.fastdrop.core.TransportType.LAN
     override suspend fun discover(): Flow<List<Peer>> {
         return emptyFlow() // Pas de découverte automatique
     }
