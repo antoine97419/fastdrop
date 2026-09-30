@@ -15,7 +15,8 @@ data class DiscoveredPeer(
     val displayName: String?,
     val addresses: List<String>,
     val port: Int,
-    val source: DiscoveryType
+    val source: DiscoveryType,
+    val protocolVersion: Int = 1
 )
 
 interface DiscoveryProvider {

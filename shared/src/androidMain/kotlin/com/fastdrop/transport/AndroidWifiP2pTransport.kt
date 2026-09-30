@@ -20,18 +20,27 @@ import io.ktor.network.sockets.Socket
 import io.ktor.network.sockets.aSocket
 import io.ktor.network.sockets.openReadChannel
 import io.ktor.network.sockets.openWriteChannel
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
+
+enum class P2pState {
+    IDLE,
+    DISCOVERING,
+    PEER_FOUND,
+    CONNECTING,
+    GROUP_FORMED,
+    OPENING_FASTDROP_CONNECTION,
+    CONNECTED,
+    DISCONNECTED,
+    FAILED
+}
 
 class AndroidWifiP2pTransport(
     private val context: Context,
@@ -47,12 +56,13 @@ class AndroidWifiP2pTransport(
     
     private val incomingConnections = Channel<Connection>(Channel.UNLIMITED)
     
-    // Si connect() a été appelé, on résout cette continuation lors de la formation du groupe
-    private var pendingConnectContinuation: kotlin.coroutines.Continuation<Connection>? = null
+    private var pendingConnectContinuation: kotlinx.coroutines.CancellableContinuation<Connection>? = null
     private var pendingPeer: Peer? = null
 
     private var receiver: BroadcastReceiver? = null
-    private val transportScope = CoroutineScope(Dispatchers.IO + Job())
+    private val transportScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    
+    val state = MutableStateFlow(P2pState.IDLE)
 
     override suspend fun discover(): Flow<List<Peer>> {
         return discoveryProvider.peers.map { discoveredPeers ->
@@ -75,17 +85,32 @@ class AndroidWifiP2pTransport(
             deviceAddress = peer.address
         }
 
-        return suspendCoroutine { cont ->
+        return suspendCancellableCoroutine { cont ->
             pendingConnectContinuation = cont
             pendingPeer = peer
+            state.value = P2pState.CONNECTING
             
+            cont.invokeOnCancellation {
+                wifiP2pManager.cancelConnect(channel, null)
+                state.value = P2pState.DISCONNECTED
+            }
+
             wifiP2pManager.connect(channel, config, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     Log.d("FastDrop", "Wi-Fi Direct connection initiated to ${peer.address}")
-                    // La suite est gérée dans le BroadcastReceiver (WIFI_P2P_CONNECTION_CHANGED_ACTION)
+                    // Timeout for group formation
+                    transportScope.launch {
+                        delay(30000) // 30s timeout
+                        if (state.value == P2pState.CONNECTING) {
+                            state.value = P2pState.FAILED
+                            wifiP2pManager.cancelConnect(channel, null)
+                            cont.resumeWithException(Exception("P2P connection timeout"))
+                        }
+                    }
                 }
 
                 override fun onFailure(reason: Int) {
+                    state.value = P2pState.FAILED
                     pendingConnectContinuation = null
                     pendingPeer = null
                     cont.resumeWithException(Exception("Wi-Fi Direct connect failed: $reason"))
@@ -115,14 +140,14 @@ class AndroidWifiP2pTransport(
                     val networkInfo = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
                     
                     if (networkInfo?.isConnected == true) {
+                        state.value = P2pState.GROUP_FORMED
                         wifiP2pManager.requestConnectionInfo(channel) { info ->
                             handleConnectionInfo(info)
                         }
                     } else {
-                        // Déconnexion ou groupe perdu
                         Log.d("FastDrop", "Wi-Fi Direct group disconnected")
-                        serverSocket?.close()
-                        serverSocket = null
+                        state.value = P2pState.DISCONNECTED
+                        cleanupTcpResources()
                     }
                 }
             }
@@ -132,6 +157,8 @@ class AndroidWifiP2pTransport(
 
     private fun handleConnectionInfo(info: WifiP2pInfo?) {
         if (info == null || !info.groupFormed) return
+        
+        state.value = P2pState.OPENING_FASTDROP_CONNECTION
         
         transportScope.launch {
             try {
@@ -143,23 +170,30 @@ class AndroidWifiP2pTransport(
                     if (serverSocket == null) {
                         serverSocket = aSocket(selectorManager).tcp().bind("0.0.0.0", port)
                     }
-                    val socket = serverSocket!!.accept()
+                    val socket = withTimeout(15000) { serverSocket!!.accept() }
                     connection = KtorWifiConnection(targetPeer, socket)
-                    
-                    // On ne ferme pas le serverSocket ici au cas où (bien que P2P soit souvent 1-à-1 ici)
                 } else {
                     val goAddress = info.groupOwnerAddress?.hostAddress ?: throw Exception("Unknown GO address")
                     Log.d("FastDrop", "We are Client, connecting to GO at $goAddress:$port...")
                     
-                    // Attente courte pour s'assurer que le GO a eu le temps de bind son ServerSocket
-                    kotlinx.coroutines.delay(500) 
-                    
-                    val socket = aSocket(selectorManager).tcp().connect(goAddress, port)
-                    connection = KtorWifiConnection(targetPeer, socket)
+                    // Retry loop with backoff
+                    var socket: Socket? = null
+                    var attempts = 0
+                    while (socket == null && attempts < 5) {
+                        try {
+                            attempts++
+                            socket = withTimeout(5000) { aSocket(selectorManager).tcp().connect(goAddress, port) }
+                        } catch (e: Exception) {
+                            if (attempts >= 5) throw e
+                            delay(1000) // backoff
+                        }
+                    }
+                    connection = KtorWifiConnection(targetPeer, socket!!)
                 }
 
+                state.value = P2pState.CONNECTED
                 val cont = pendingConnectContinuation
-                if (cont != null) {
+                if (cont != null && cont.isActive) {
                     pendingConnectContinuation = null
                     pendingPeer = null
                     cont.resume(connection)
@@ -168,8 +202,9 @@ class AndroidWifiP2pTransport(
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                state.value = P2pState.FAILED
                 val cont = pendingConnectContinuation
-                if (cont != null) {
+                if (cont != null && cont.isActive) {
                     pendingConnectContinuation = null
                     pendingPeer = null
                     cont.resumeWithException(e)
@@ -178,15 +213,25 @@ class AndroidWifiP2pTransport(
         }
     }
 
+    private fun cleanupTcpResources() {
+        try { serverSocket?.close() } catch (e: Exception) {}
+        serverSocket = null
+        val cont = pendingConnectContinuation
+        if (cont != null && cont.isActive) {
+            cont.resumeWithException(Exception("Group disconnected"))
+            pendingConnectContinuation = null
+        }
+    }
+
     override suspend fun stop() {
         receiver?.let { context.unregisterReceiver(it) }
         receiver = null
         
-        serverSocket?.close()
-        serverSocket = null
+        cleanupTcpResources()
         
         wifiP2pManager.removeGroup(channel, null)
         selectorManager.close()
+        transportScope.cancel()
     }
 }
 
