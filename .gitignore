@@ -8,3 +8,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+gradle-8.6/
+gradle-8.6-bin.zip
+build/
+androidApp/build/
+shared/build/
+shared/bridge/windows/bin/
+shared/bridge/windows/obj/
