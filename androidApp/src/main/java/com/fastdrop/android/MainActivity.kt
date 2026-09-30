@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var peerStore: AndroidTrustedPeerStore
     private lateinit var deviceInfoProvider: AndroidDeviceInfoProvider
     private lateinit var discoveryManager: DiscoveryManager
-    private lateinit var transport: GenericLanTransport
+    private lateinit var transport: com.fastdrop.transport.Transport
     private lateinit var transferManager: TransferManager
     private lateinit var cryptoProvider: CryptographyProvider
 
@@ -63,8 +63,25 @@ class MainActivity : ComponentActivity() {
     }
     private var selectedPeerForTransfer: com.fastdrop.discovery.DiscoveredPeer? = null
 
+    // Permissions launcher
+    private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+        if (permissions.values.all { it }) {
+            // Permissions granted
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Request permissions
+        val permissionsToRequest = mutableListOf(
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         
         cryptoProvider = CryptographyProvider.Default
         identityStore = AndroidIdentityStore(this, cryptoProvider)
@@ -72,10 +89,30 @@ class MainActivity : ComponentActivity() {
         deviceInfoProvider = AndroidDeviceInfoProvider()
         
         val deviceName = kotlinx.coroutines.runBlocking { deviceInfoProvider.getDeviceName() }
-        val mDNS = AndroidNsdDiscoveryProvider(this, deviceName)
-        discoveryManager = DiscoveryManager(listOf(mDNS))
         
-        transport = GenericLanTransport(mDNS)
+        // P2P Setup
+        val hasWifiDirect = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
+        
+        val discoveryProviders = mutableListOf<com.fastdrop.discovery.DiscoveryProvider>()
+        val mDNS = AndroidNsdDiscoveryProvider(this, deviceName)
+        discoveryProviders.add(mDNS)
+
+        if (hasWifiDirect) {
+            val wifiP2pManager = getSystemService(Context.WIFI_P2P_SERVICE) as android.net.wifi.p2p.WifiP2pManager
+            val p2pChannel = wifiP2pManager.initialize(this, mainLooper, null)
+            val p2pDiscovery = com.fastdrop.discovery.AndroidWifiP2pDiscoveryProvider(this, wifiP2pManager, p2pChannel)
+            val p2pTransport = com.fastdrop.transport.AndroidWifiP2pTransport(this, wifiP2pManager, p2pChannel, p2pDiscovery)
+            discoveryProviders.add(p2pDiscovery)
+            
+            // For testing P2P, we just use p2pTransport. (Real app would have a unified transport or selection UI)
+            transport = p2pTransport
+        } else {
+            Toast.makeText(this, "Wi-Fi Direct unavailable on this device", Toast.LENGTH_LONG).show()
+            transport = GenericLanTransport(mDNS)
+        }
+
+        // Combine discovery
+        discoveryManager = DiscoveryManager(discoveryProviders)
         transferManager = TransferManager()
         
         setContent {
@@ -193,7 +230,12 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) { appState.value = "Connecting to ${discoveredPeer.displayName}..." }
                 val targetIp = discoveredPeer.addresses.firstOrNull() ?: return@launch
                 
-                val peer = Peer(targetIp, discoveredPeer.displayName ?: "Target", TransportType.LAN, targetIp)
+                val transportType = if (discoveredPeer.source == com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT) {
+                    TransportType.WIFI_DIRECT
+                } else {
+                    TransportType.LAN
+                }
+                val peer = Peer(discoveredPeer.discoveryId, discoveredPeer.displayName ?: "Target", transportType, targetIp)
                 val rawConn = transport.connect(peer)
                 
                 withContext(Dispatchers.Main) { appState.value = "Authenticating..." }
