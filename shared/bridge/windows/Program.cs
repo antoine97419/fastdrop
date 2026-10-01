@@ -202,33 +202,15 @@ namespace FastDropBridge
                 Console.WriteLine($"Publisher status: {e.Status}");
             };
 
-            listener = new WiFiDirectConnectionListener();
-            listener.ConnectionRequested += async (s, e) =>
-            {
-                Console.WriteLine("Connection requested by: " + e.GetConnectionRequest().DeviceInformation.Name);
-                try
-                {
-                    var wfdDevice = await WiFiDirectDevice.FromIdAsync(e.GetConnectionRequest().DeviceInformation.Id);
-                    var endpoints = wfdDevice.GetConnectionEndpointPairs();
-                    Console.WriteLine("Connected!");
-                    foreach (var ep in endpoints)
-                    {
-                        Console.WriteLine($"  Local: {ep.LocalHostName?.DisplayName}  Remote: {ep.RemoteHostName?.DisplayName}");
-                    }
-
-                    await TestTcpServer();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("Connection error: " + ex.Message);
-                }
-            };
-
             publisher.Start();
             Console.WriteLine($"Advertising as GO.");
             Console.WriteLine($"SSID: {publisher.Advertisement.LegacySettings.Ssid}");
             Console.WriteLine($"Passphrase: fastdrop123");
             Console.WriteLine("Try connecting from Android. Press ENTER to stop.");
+            
+            // Start TCP server immediately since Legacy AP clients don't trigger ConnectionRequested
+            await TestTcpServer();
+            
             Console.ReadLine();
             publisher.Stop();
         }

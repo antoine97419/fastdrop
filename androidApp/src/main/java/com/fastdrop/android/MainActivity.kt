@@ -145,6 +145,9 @@ class MainActivity : ComponentActivity() {
                             sasCodeState.value = null
                             pendingVerification = null
                             // In real app, close connection
+                        },
+                        onLegacyGoClick = {
+                            connectToLegacyGo()
                         }
                     )
                 }
@@ -277,6 +280,56 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun connectToLegacyGo() {
+        val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val specifier = android.net.wifi.WifiNetworkSpecifier.Builder()
+            .setSsid("DIRECT-FD-FastDropPC")
+            .setWpa2Passphrase("fastdrop123")
+            .build()
+        val request = android.net.NetworkRequest.Builder()
+            .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .setNetworkSpecifier(specifier)
+            .build()
+            
+        appState.value = "Requesting network DIRECT-FD-FastDropPC..."
+
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                super.onAvailable(network)
+                lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        connectivityManager.bindProcessToNetwork(network)
+                        android.util.Log.d("FastDrop", "Network available! Process bound. Connecting to 192.168.137.1:47832")
+                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "Wi-Fi Connected! Testing TCP PING..." }
+                        
+                        val socket = java.net.Socket("192.168.137.1", 47832)
+                        val out = socket.getOutputStream()
+                        out.write("PING\n".toByteArray())
+                        out.flush()
+                        
+                        val reader = socket.getInputStream().bufferedReader()
+                        val response = reader.readLine()
+                        android.util.Log.d("FastDrop", "Received from Windows: $response")
+                        
+                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Success! Windows said: $response" }
+                        socket.close()
+                        connectivityManager.bindProcessToNetwork(null)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Fail: ${e.message}" }
+                        connectivityManager.bindProcessToNetwork(null)
+                    }
+                }
+            }
+            override fun onUnavailable() {
+                super.onUnavailable()
+                appState.value = "Network unavailable (timeout/rejected)"
+            }
+        }
+        connectivityManager.requestNetwork(request, callback)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         lifecycleScope.launch(Dispatchers.IO) {
@@ -294,10 +347,16 @@ fun FastDropApp(
     sasCode: String?,
     onSendClick: (com.fastdrop.discovery.DiscoveredPeer) -> Unit,
     onAcceptSas: () -> Unit,
-    onRejectSas: () -> Unit
+    onRejectSas: () -> Unit,
+    onLegacyGoClick: () -> Unit
 ) {
     Column(modifier = Modifier.padding(16.dp)) {
         Text("FastDrop", style = MaterialTheme.typography.headlineMedium)
+        
+        Button(onClick = onLegacyGoClick, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            Text("Spike: Connect to Windows Legacy GO")
+        }
+        
         Spacer(Modifier.height(16.dp))
         
         Text("Nearby devices", style = MaterialTheme.typography.titleMedium)
