@@ -296,17 +296,43 @@ class MainActivity : ComponentActivity() {
         android.util.Log.d("FastDrop", "Calling requestNetwork for DIRECT-FD-FastDropPC")
 
         val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            private var tcpAttempted = false
+
             override fun onAvailable(network: android.net.Network) {
                 super.onAvailable(network)
-                android.util.Log.d("FastDrop", "onAvailable called for Legacy GO network")
+                android.util.Log.d("FastDrop", "onAvailable called. Network: $network. Waiting for LinkProperties...")
+            }
+
+            override fun onLinkPropertiesChanged(network: android.net.Network, linkProperties: android.net.LinkProperties) {
+                super.onLinkPropertiesChanged(network, linkProperties)
+                if (tcpAttempted) return
+
+                val ipv4 = linkProperties.linkAddresses.firstOrNull { it.address is java.net.Inet4Address }
+                if (ipv4 == null) {
+                    android.util.Log.d("FastDrop", "LinkProperties changed but no IPv4 yet: $linkProperties")
+                    return
+                }
+                
+                android.util.Log.d("FastDrop", "IPv4 obtained: ${ipv4.address.hostAddress}")
+                android.util.Log.d("FastDrop", "Routes: ${linkProperties.routes}")
+                
+                tcpAttempted = true
                 val currentCallback = this
+                
                 lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    var socket: java.net.Socket? = null
                     try {
-                        connectivityManager.bindProcessToNetwork(network)
-                        android.util.Log.d("FastDrop", "Network available! Process bound. Connecting to 192.168.137.1:47832")
-                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "Wi-Fi Connected! Testing TCP PING..." }
+                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "Wi-Fi Ready! Creating explicitly bound TCP Socket..." }
                         
-                        val socket = java.net.Socket("192.168.137.1", 47832)
+                        socket = network.socketFactory.createSocket()
+                        android.util.Log.d("FastDrop", "Socket created via network.socketFactory")
+                        
+                        android.util.Log.d("FastDrop", "Attempting connection to 192.168.137.1:47832...")
+                        socket.connect(java.net.InetSocketAddress("192.168.137.1", com.fastdrop.FastDropConfig.DEFAULT_PORT), 15_000)
+                        
+                        android.util.Log.d("FastDrop", "TCP Connected! Local Address: ${socket.localSocketAddress}")
+                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Connected! Sending PING..." }
+                        
                         val out = socket.getOutputStream()
                         out.write("PING\n".toByteArray())
                         out.flush()
@@ -316,16 +342,16 @@ class MainActivity : ComponentActivity() {
                         android.util.Log.d("FastDrop", "Received from Windows: $response")
                         
                         withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Success! Windows said: $response" }
-                        socket.close()
                     } catch (e: Exception) {
                         android.util.Log.e("FastDrop", "TCP connection failed", e)
                         withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Fail: ${e.message}" }
                     } finally {
-                        connectivityManager.bindProcessToNetwork(null)
+                        socket?.close()
                         connectivityManager.unregisterNetworkCallback(currentCallback)
                     }
                 }
             }
+
             override fun onUnavailable() {
                 super.onUnavailable()
                 android.util.Log.e("FastDrop", "onUnavailable called (network request timeout or rejected)")
