@@ -299,6 +299,7 @@ class MainActivity : ComponentActivity() {
             override fun onAvailable(network: android.net.Network) {
                 super.onAvailable(network)
                 android.util.Log.d("FastDrop", "onAvailable called for Legacy GO network")
+                val currentCallback = this
                 lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         connectivityManager.bindProcessToNetwork(network)
@@ -321,7 +322,7 @@ class MainActivity : ComponentActivity() {
                         withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Fail: ${e.message}" }
                     } finally {
                         connectivityManager.bindProcessToNetwork(null)
-                        connectivityManager.unregisterNetworkCallback(this@NetworkCallback)
+                        connectivityManager.unregisterNetworkCallback(currentCallback)
                     }
                 }
             }
