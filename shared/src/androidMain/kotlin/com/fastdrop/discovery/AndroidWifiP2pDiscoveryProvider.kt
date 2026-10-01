@@ -1,8 +1,12 @@
 package com.fastdrop.discovery
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.wifi.p2p.WifiP2pDevice
+import android.net.wifi.p2p.WifiP2pDeviceList
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
@@ -24,13 +28,14 @@ class AndroidWifiP2pDiscoveryProvider(
     
     private var isStarted = false
     private var serviceRequest: WifiP2pDnsSdServiceRequest? = null
+    private var receiver: BroadcastReceiver? = null
 
     @SuppressLint("MissingPermission")
     override suspend fun start() {
         if (isStarted) return
         isStarted = true
 
-        // 1. Add Local Service
+        // 1. Add Local Service (for Android <-> Android)
         val record = mapOf(
             "version" to "1",
             "port" to FastDropConfig.DEFAULT_PORT.toString()
@@ -48,7 +53,6 @@ class AndroidWifiP2pDiscoveryProvider(
         // 2. Setup DnsSdResponseListeners
         wifiP2pManager.setDnsSdResponseListeners(channel,
             WifiP2pManager.DnsSdServiceResponseListener { instanceName, registrationType, srcDevice ->
-                // Service response
                 if (instanceName.equals("FastDrop", ignoreCase = true) && registrationType.contains("_fastdrop._tcp")) {
                     val peer = DiscoveredPeer(
                         discoveryId = srcDevice.deviceAddress,
@@ -65,7 +69,6 @@ class AndroidWifiP2pDiscoveryProvider(
                 }
             },
             WifiP2pManager.DnsSdTxtRecordListener { fullDomainName, recordMap, srcDevice ->
-                // TXT Record response (can be used to check version)
                 if (recordMap["version"] == "1") {
                     Log.d("FastDrop", "P2P Valid TXT record from ${srcDevice.deviceAddress}")
                     synchronized(currentDiscovered) {
@@ -97,14 +100,56 @@ class AndroidWifiP2pDiscoveryProvider(
                 Log.e("FastDrop", "P2P Add service request failed: $reason")
             }
         })
+
+        // 5. Fallback for Windows: Raw P2P Peer discovery
+        val intentFilter = IntentFilter(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+        receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                wifiP2pManager.requestPeers(channel) { peerList: WifiP2pDeviceList? ->
+                    peerList?.deviceList?.forEach { srcDevice ->
+                        synchronized(currentDiscovered) {
+                            // Only add if not already discovered via DNS-SD (DNS-SD is richer)
+                            if (!currentDiscovered.containsKey(srcDevice.deviceAddress)) {
+                                val peer = DiscoveredPeer(
+                                    discoveryId = srcDevice.deviceAddress,
+                                    displayName = srcDevice.deviceName.takeIf { it.isNotBlank() } ?: "Windows PC",
+                                    addresses = listOf(srcDevice.deviceAddress),
+                                    port = FastDropConfig.DEFAULT_PORT,
+                                    source = DiscoveryType.WIFI_DIRECT,
+                                    protocolVersion = 1 // Assumption for standard P2P
+                                )
+                                currentDiscovered[peer.discoveryId] = peer
+                            }
+                        }
+                    }
+                    synchronized(currentDiscovered) {
+                        _peers.value = currentDiscovered.values.toList()
+                    }
+                }
+            }
+        }
+        context.registerReceiver(receiver, intentFilter)
+
+        wifiP2pManager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {
+                Log.d("FastDrop", "Raw P2P peer discovery started")
+            }
+            override fun onFailure(reason: Int) {
+                Log.e("FastDrop", "Raw P2P peer discovery failed: $reason")
+            }
+        })
     }
 
     override suspend fun stop() {
         if (!isStarted) return
         isStarted = false
 
+        receiver?.let { context.unregisterReceiver(it) }
+        receiver = null
+
         wifiP2pManager.clearLocalServices(channel, null)
         wifiP2pManager.clearServiceRequests(channel, null)
+        wifiP2pManager.stopPeerDiscovery(channel, null)
         
         synchronized(currentDiscovered) {
             currentDiscovered.clear()
