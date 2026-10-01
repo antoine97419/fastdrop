@@ -293,10 +293,12 @@ class MainActivity : ComponentActivity() {
             .build()
             
         appState.value = "Requesting network DIRECT-FD-FastDropPC..."
+        android.util.Log.d("FastDrop", "Calling requestNetwork for DIRECT-FD-FastDropPC")
 
         val callback = object : android.net.ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: android.net.Network) {
                 super.onAvailable(network)
+                android.util.Log.d("FastDrop", "onAvailable called for Legacy GO network")
                 lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         connectivityManager.bindProcessToNetwork(network)
@@ -314,20 +316,37 @@ class MainActivity : ComponentActivity() {
                         
                         withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Success! Windows said: $response" }
                         socket.close()
-                        connectivityManager.bindProcessToNetwork(null)
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        android.util.Log.e("FastDrop", "TCP connection failed", e)
                         withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Fail: ${e.message}" }
+                    } finally {
                         connectivityManager.bindProcessToNetwork(null)
+                        connectivityManager.unregisterNetworkCallback(this@NetworkCallback)
                     }
                 }
             }
             override fun onUnavailable() {
                 super.onUnavailable()
+                android.util.Log.e("FastDrop", "onUnavailable called (network request timeout or rejected)")
                 appState.value = "Network unavailable (timeout/rejected)"
+                connectivityManager.unregisterNetworkCallback(this)
+            }
+            override fun onLost(network: android.net.Network) {
+                super.onLost(network)
+                android.util.Log.e("FastDrop", "onLost called - network connection lost")
             }
         }
-        connectivityManager.requestNetwork(request, callback)
+        
+        try {
+            connectivityManager.requestNetwork(request, callback)
+            android.util.Log.d("FastDrop", "requestNetwork executed without Exception")
+        } catch (e: SecurityException) {
+            android.util.Log.e("FastDrop", "SecurityException during requestNetwork", e)
+            appState.value = "Permission denied: ${e.message}"
+        } catch (e: Exception) {
+            android.util.Log.e("FastDrop", "Exception during requestNetwork", e)
+            appState.value = "Error: ${e.message}"
+        }
     }
 
     override fun onDestroy() {
