@@ -44,7 +44,7 @@ namespace FastDropBridge
         static async Task SpikeWatcher()
         {
             Console.WriteLine("Starting Wi-Fi Direct Device Watcher...");
-            string deviceSelector = WiFiDirectDevice.GetDeviceSelector();
+            string deviceSelector = WiFiDirectDevice.GetDeviceSelector(WiFiDirectDeviceSelectorType.AssociationEndpoint);
             watcher = DeviceInformation.CreateWatcher(deviceSelector);
 
             watcher.Added += (DeviceWatcher sender, DeviceInformation args) =>
@@ -52,17 +52,32 @@ namespace FastDropBridge
                 lock (discoveredDevices)
                 {
                     discoveredDevices.Add(args);
-                    Console.WriteLine($"[{discoveredDevices.Count - 1}] Found device: {args.Name} (ID: {args.Id})");
+                    Console.WriteLine($"[{discoveredDevices.Count - 1}] Added: {args.Name} (ID: {args.Id})");
                 }
+            };
+
+            watcher.Updated += (DeviceWatcher sender, DeviceInformationUpdate args) =>
+            {
+                Console.WriteLine($"[Watcher] Updated: {args.Id}");
             };
 
             watcher.Removed += (DeviceWatcher sender, DeviceInformationUpdate args) =>
             {
-                // Simple spike, ignoring removals for now
+                Console.WriteLine($"[Watcher] Removed: {args.Id}");
+            };
+
+            watcher.EnumerationCompleted += (DeviceWatcher sender, object args) =>
+            {
+                Console.WriteLine("[Watcher] Enumeration Completed.");
+            };
+
+            watcher.Stopped += (DeviceWatcher sender, object args) =>
+            {
+                Console.WriteLine("[Watcher] Stopped.");
             };
 
             watcher.Start();
-            Console.WriteLine("Scanning... Ensure Android is running FastDrop (which enables discovery).");
+            Console.WriteLine("Scanning with AssociationEndpoint... Ensure Android is running FastDrop.");
             Console.WriteLine("Type the index of the device to connect, or 'q' to quit:");
 
             while (true)
