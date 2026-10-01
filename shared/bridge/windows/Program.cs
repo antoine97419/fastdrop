@@ -206,48 +206,11 @@ namespace FastDropBridge
             Console.WriteLine($"Advertising as GO.");
             Console.WriteLine($"SSID: {publisher.Advertisement.LegacySettings.Ssid}");
             Console.WriteLine($"Passphrase: fastdrop123");
-            Console.WriteLine("Try connecting from Android. Press ENTER to stop.");
-            
-            // Start TCP server immediately since Legacy AP clients don't trigger ConnectionRequested
-            await TestTcpServer();
+            Console.WriteLine("Wi-Fi Direct link is up. FastDrop JVM should be running to handle TCP connections.");
+            Console.WriteLine("Press ENTER to stop.");
             
             Console.ReadLine();
             publisher.Stop();
-        }
-
-        static async Task TestTcpServer()
-        {
-            try {
-                var listener = new StreamSocketListener();
-                listener.ConnectionReceived += (s, e) =>
-                {
-                    Console.WriteLine($"TCP PING received from {e.Socket.Information.RemoteAddress.DisplayName}!");
-                    using var writer = new Windows.Storage.Streams.DataWriter(e.Socket.OutputStream);
-                    writer.WriteString("PONG\n");
-                    writer.StoreAsync().AsTask().Wait();
-                    Console.WriteLine("TCP PONG sent!");
-                };
-                await listener.BindServiceNameAsync("47832");
-                Console.WriteLine("TCP Server listening on port 47832");
-            } catch (Exception ex) {
-                Console.WriteLine("Failed to bind TCP server: " + ex.Message);
-            }
-        }
-
-        static async Task TestTcpClient(string remoteIp)
-        {
-            try {
-                Console.WriteLine($"Connecting TCP Client to {remoteIp}:47832 ...");
-                var socket = new StreamSocket();
-                await socket.ConnectAsync(new Windows.Networking.HostName(remoteIp), "47832");
-                Console.WriteLine("TCP Connected! Sending PING...");
-                using var writer = new Windows.Storage.Streams.DataWriter(socket.OutputStream);
-                writer.WriteString("PING\n");
-                await writer.StoreAsync();
-                Console.WriteLine("PING sent.");
-            } catch (Exception ex) {
-                Console.WriteLine("Failed to connect TCP client: " + ex.Message);
-            }
         }
     }
 }

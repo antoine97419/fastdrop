@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private val sasCodeState = mutableStateOf<String?>(null)
     private var pendingVerification: PeerVerification.NewPeer? = null
     private var pendingSecureChannel: SecureChannel? = null
+    private var activeLegacySecureChannel: SecureChannel? = null
     
     // File picker launcher
     private val pickFileLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -147,7 +148,11 @@ class MainActivity : ComponentActivity() {
                             // In real app, close connection
                         },
                         onLegacyGoClick = {
-                            connectToLegacyGo()
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                                connectToLegacyGo()
+                            } else {
+                                appState.value = "Legacy GO requires Android 10+"
+                            }
                         }
                     )
                 }
@@ -233,28 +238,33 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) { appState.value = "Connecting to ${discoveredPeer.displayName}..." }
                 val targetIp = discoveredPeer.addresses.firstOrNull() ?: return@launch
                 
-                val transportType = if (discoveredPeer.source == com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT) {
-                    TransportType.WIFI_DIRECT
+                val secureChannel = if (discoveredPeer.discoveryId == "windows-legacy-go" && activeLegacySecureChannel != null) {
+                    activeLegacySecureChannel!!
                 } else {
-                    TransportType.LAN
-                }
-                val peer = Peer(discoveredPeer.discoveryId, discoveredPeer.displayName ?: "Target", transportType, targetIp)
-                val rawConn = transport.connect(peer)
-                
-                withContext(Dispatchers.Main) { appState.value = "Authenticating..." }
-                val secureChannel = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
-                
-                val verification = secureChannel.handshake()
-                if (verification is PeerVerification.NewPeer) {
-                    withContext(Dispatchers.Main) { 
-                        pendingVerification = verification
-                        pendingSecureChannel = secureChannel
-                        sasCodeState.value = verification.sas
-                        appState.value = "Waiting for SAS confirmation..."
+                    val transportType = if (discoveredPeer.source == com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT) {
+                        TransportType.WIFI_DIRECT
+                    } else {
+                        TransportType.LAN
                     }
-                    while (pendingVerification != null) { kotlinx.coroutines.delay(100) }
-                } else {
-                    // nothing
+                    val peer = Peer(discoveredPeer.discoveryId, discoveredPeer.displayName ?: "Target", transportType, targetIp)
+                    val rawConn = transport.connect(peer)
+                    
+                    withContext(Dispatchers.Main) { appState.value = "Authenticating..." }
+                    val sc = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
+                    
+                    val verification = sc.handshake()
+                    if (verification is PeerVerification.NewPeer) {
+                        withContext(Dispatchers.Main) { 
+                            pendingVerification = verification
+                            pendingSecureChannel = sc
+                            sasCodeState.value = verification.sas
+                            appState.value = "Waiting for SAS confirmation..."
+                        }
+                        while (pendingVerification != null) { kotlinx.coroutines.delay(100) }
+                    } else {
+                        // nothing
+                    }
+                    sc
                 }
 
                 withContext(Dispatchers.Main) { appState.value = "Sending file..." }
@@ -280,99 +290,56 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @android.annotation.SuppressLint("NewApi")
     private fun connectToLegacyGo() {
-        val connectivityManager = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val specifier = android.net.wifi.WifiNetworkSpecifier.Builder()
-            .setSsid("DIRECT-FD-FastDropPC")
-            .setWpa2Passphrase("fastdrop123")
-            .build()
-        val request = android.net.NetworkRequest.Builder()
-            .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
-            .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .setNetworkSpecifier(specifier)
-            .build()
-            
-        appState.value = "Requesting network DIRECT-FD-FastDropPC..."
-        android.util.Log.d("FastDrop", "Calling requestNetwork for DIRECT-FD-FastDropPC")
-
-        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-            private var tcpAttempted = false
-
-            override fun onAvailable(network: android.net.Network) {
-                super.onAvailable(network)
-                android.util.Log.d("FastDrop", "onAvailable called. Network: $network. Waiting for LinkProperties...")
-            }
-
-            override fun onLinkPropertiesChanged(network: android.net.Network, linkProperties: android.net.LinkProperties) {
-                super.onLinkPropertiesChanged(network, linkProperties)
-                if (tcpAttempted) return
-
-                val ipv4 = linkProperties.linkAddresses.firstOrNull { it.address is java.net.Inet4Address }
-                if (ipv4 == null) {
-                    android.util.Log.d("FastDrop", "LinkProperties changed but no IPv4 yet: $linkProperties")
-                    return
-                }
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) { appState.value = "Requesting Windows Legacy GO Network..." }
+                val connector = com.fastdrop.transport.AndroidLegacyGoConnector(this@MainActivity)
+                val rawConn = connector.connect()
                 
-                android.util.Log.d("FastDrop", "IPv4 obtained: ${ipv4.address.hostAddress}")
-                android.util.Log.d("FastDrop", "Routes: ${linkProperties.routes}")
+                withContext(Dispatchers.Main) { appState.value = "Authenticating with Windows..." }
+                val secureChannel = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
                 
-                tcpAttempted = true
-                val currentCallback = this
-                
-                lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    var socket: java.net.Socket? = null
-                    try {
-                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "Wi-Fi Ready! Creating explicitly bound TCP Socket..." }
-                        
-                        socket = network.socketFactory.createSocket()
-                        android.util.Log.d("FastDrop", "Socket created via network.socketFactory")
-                        
-                        android.util.Log.d("FastDrop", "Attempting connection to 192.168.137.1:47832...")
-                        socket.connect(java.net.InetSocketAddress("192.168.137.1", com.fastdrop.FastDropConfig.DEFAULT_PORT), 15_000)
-                        
-                        android.util.Log.d("FastDrop", "TCP Connected! Local Address: ${socket.localSocketAddress}")
-                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Connected! Sending PING..." }
-                        
-                        val out = socket.getOutputStream()
-                        out.write("PING\n".toByteArray())
-                        out.flush()
-                        
-                        val reader = socket.getInputStream().bufferedReader()
-                        val response = reader.readLine()
-                        android.util.Log.d("FastDrop", "Received from Windows: $response")
-                        
-                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Success! Windows said: $response" }
-                    } catch (e: Exception) {
-                        android.util.Log.e("FastDrop", "TCP connection failed", e)
-                        withContext(kotlinx.coroutines.Dispatchers.Main) { appState.value = "TCP Fail: ${e.message}" }
-                    } finally {
-                        socket?.close()
-                        connectivityManager.unregisterNetworkCallback(currentCallback)
+                val verification = secureChannel.handshake()
+                if (verification is PeerVerification.NewPeer) {
+                    withContext(Dispatchers.Main) { 
+                        pendingVerification = verification
+                        pendingSecureChannel = secureChannel
+                        sasCodeState.value = verification.sas
+                        appState.value = "Waiting for SAS confirmation..."
                     }
+                    while (pendingVerification != null) { kotlinx.coroutines.delay(100) }
+                } else {
+                    withContext(Dispatchers.Main) { appState.value = "Trusted peer connected." }
                 }
-            }
 
-            override fun onUnavailable() {
-                super.onUnavailable()
-                android.util.Log.e("FastDrop", "onUnavailable called (network request timeout or rejected)")
-                appState.value = "Network unavailable (timeout/rejected)"
-                connectivityManager.unregisterNetworkCallback(this)
+                withContext(Dispatchers.Main) { appState.value = "Handshake Success! SecureChannel Ready." }
+                
+                activeLegacySecureChannel = secureChannel
+                
+                // Add this Windows peer to the UI list so the user can click it to send a file
+                val windowPeer = com.fastdrop.discovery.DiscoveredPeer(
+                    discoveryId = "windows-legacy-go",
+                    displayName = "Windows PC (Legacy GO)",
+                    addresses = listOf("192.168.137.1"),
+                    port = 47832,
+                    source = com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT,
+                    protocolVersion = 1
+                )
+                
+                // For simplicity, we just trigger the file picker immediately
+                withContext(Dispatchers.Main) { 
+                    selectedPeerForTransfer = windowPeer
+                    // Also we need to make sendFile reuse the established SecureChannel
+                    // Or we let sendFile initiate a new connection?
+                    // Actually, if we just want to test Android -> Windows:
+                    pickFileLauncher.launch("*/*") 
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                withContext(Dispatchers.Main) { appState.value = "Error: ${e.message}" }
             }
-            override fun onLost(network: android.net.Network) {
-                super.onLost(network)
-                android.util.Log.e("FastDrop", "onLost called - network connection lost")
-            }
-        }
-        
-        try {
-            connectivityManager.requestNetwork(request, callback)
-            android.util.Log.d("FastDrop", "requestNetwork executed without Exception")
-        } catch (e: SecurityException) {
-            android.util.Log.e("FastDrop", "SecurityException during requestNetwork", e)
-            appState.value = "Permission denied: ${e.message}"
-        } catch (e: Exception) {
-            android.util.Log.e("FastDrop", "Exception during requestNetwork", e)
-            appState.value = "Error: ${e.message}"
         }
     }
 
