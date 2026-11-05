@@ -1,11 +1,8 @@
 using System;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Windows.Devices.WiFiDirect;
 using Windows.Security.Credentials;
-using Windows.Networking.Sockets;
 using Windows.Devices.Enumeration;
-using System.Linq;
 using System.Collections.Generic;
 
 namespace FastDropBridge
@@ -15,7 +12,8 @@ namespace FastDropBridge
         static WiFiDirectAdvertisementPublisher? publisher;
         static WiFiDirectConnectionListener? listener;
         static DeviceWatcher? watcher;
-        static List<DeviceInformation> discoveredDevices = new List<DeviceInformation>();
+        static readonly List<DeviceInformation> discoveredDevices = new List<DeviceInformation>();
+        static readonly List<WiFiDirectDevice> activeConnections = new List<WiFiDirectDevice>();
 
         static async Task Main(string[] args)
         {
@@ -102,32 +100,17 @@ namespace FastDropBridge
                         try
                         {
                             var wfdDevice = await WiFiDirectDevice.FromIdAsync(selectedDevice.Id);
+                            lock (activeConnections)
+                            {
+                                activeConnections.Add(wfdDevice);
+                            }
                             var endpoints = wfdDevice.GetConnectionEndpointPairs();
                             Console.WriteLine("Connected!");
                             foreach (var ep in endpoints)
                             {
                                 Console.WriteLine($"  Local: {ep.LocalHostName?.DisplayName}  Remote: {ep.RemoteHostName?.DisplayName}");
                             }
-
-                            // We don't know who is GO. Let's ask user.
-                            Console.WriteLine("Type 'L' to act as TCP Server (Listen), or 'C' to act as TCP Client (Connect):");
-                            var role = Console.ReadLine()?.ToUpper();
-                            if (role == "L")
-                            {
-                                await TestTcpServer();
-                            }
-                            else if (role == "C")
-                            {
-                                var remoteHost = endpoints.FirstOrDefault()?.RemoteHostName?.DisplayName;
-                                if (remoteHost != null)
-                                {
-                                    await TestTcpClient(remoteHost);
-                                }
-                                else
-                                {
-                                    Console.WriteLine("No remote host IP found.");
-                                }
-                            }
+                            Console.WriteLine("Wi-Fi Direct link is up. FastDrop JVM handles TCP connections.");
                         }
                         catch (Exception ex)
                         {
@@ -144,7 +127,7 @@ namespace FastDropBridge
             watcher.Stop();
         }
 
-        static async Task SpikeStandard()
+        static Task SpikeStandard()
         {
             Console.WriteLine("Starting Standard Wi-Fi Direct Advertisement...");
             publisher = new WiFiDirectAdvertisementPublisher();
@@ -162,14 +145,17 @@ namespace FastDropBridge
                 try
                 {
                     var wfdDevice = await WiFiDirectDevice.FromIdAsync(e.GetConnectionRequest().DeviceInformation.Id);
+                    lock (activeConnections)
+                    {
+                        activeConnections.Add(wfdDevice);
+                    }
                     var endpoints = wfdDevice.GetConnectionEndpointPairs();
                     Console.WriteLine("Connected!");
                     foreach (var ep in endpoints)
                     {
                         Console.WriteLine($"  Local: {ep.LocalHostName?.DisplayName}  Remote: {ep.RemoteHostName?.DisplayName}");
                     }
-
-                    await TestTcpServer();
+                    Console.WriteLine("Wi-Fi Direct link is up. FastDrop JVM handles TCP connections.");
                 }
                 catch (Exception ex)
                 {
@@ -182,9 +168,10 @@ namespace FastDropBridge
             Console.WriteLine("Try discovering from Android. Press ENTER to stop.");
             Console.ReadLine();
             publisher.Stop();
+            return Task.CompletedTask;
         }
 
-        static async Task SpikeAutonomous()
+        static Task SpikeAutonomous()
         {
             Console.WriteLine("Starting Autonomous Group Owner (Legacy AP)...");
             publisher = new WiFiDirectAdvertisementPublisher();
@@ -211,6 +198,7 @@ namespace FastDropBridge
             
             Console.ReadLine();
             publisher.Stop();
+            return Task.CompletedTask;
         }
     }
 }
