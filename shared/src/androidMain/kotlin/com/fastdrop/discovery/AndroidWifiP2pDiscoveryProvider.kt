@@ -60,7 +60,8 @@ class AndroidWifiP2pDiscoveryProvider(
                         addresses = listOf(srcDevice.deviceAddress),
                         port = FastDropConfig.DEFAULT_PORT,
                         source = DiscoveryType.WIFI_DIRECT,
-                        protocolVersion = 1
+                        protocolVersion = 1,
+                        isFastDropService = true
                     )
                     synchronized(currentDiscovered) {
                         currentDiscovered[peer.discoveryId] = peer

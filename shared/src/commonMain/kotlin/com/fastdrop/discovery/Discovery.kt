@@ -16,7 +16,8 @@ data class DiscoveredPeer(
     val addresses: List<String>,
     val port: Int,
     val source: DiscoveryType,
-    val protocolVersion: Int = 1
+    val protocolVersion: Int = 1,
+    val isFastDropService: Boolean = false
 )
 
 interface DiscoveryProvider {
@@ -29,20 +30,17 @@ interface DiscoveryProvider {
 class DiscoveryManager(
     private val providers: List<DiscoveryProvider>
 ) {
-    // Basic aggregation
     val peers: Flow<List<DiscoveredPeer>> = kotlinx.coroutines.flow.channelFlow {
-        // Collect from all providers and merge/deduplicate
-        val currentPeers = mutableMapOf<String, DiscoveredPeer>()
-        
-        // For simplicity in MVP, we can just launch collectors for each provider
-        providers.forEach { provider ->
+        val latest = Array(providers.size) { emptyList<DiscoveredPeer>() }
+        providers.forEachIndexed { index, provider ->
             launch {
                 provider.peers.collect { list ->
-                    // Merge logic: we can just replace them based on discoveryId
-                    // Or keep it simple: just take the latest from the provider
-                    // (A more advanced merge logic is needed for multi-provider)
-                    // For now, just emit the list from the single provider.
-                    send(list)
+                    latest[index] = list
+                    send(latest.flatMap { it }
+                        .groupBy { it.discoveryId }
+                        .values.map { matches ->
+                            matches.firstOrNull { it.isFastDropService } ?: matches.first()
+                        })
                 }
             }
         }

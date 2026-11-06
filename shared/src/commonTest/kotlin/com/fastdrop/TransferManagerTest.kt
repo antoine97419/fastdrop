@@ -12,6 +12,7 @@ import com.fastdrop.transfer.FrameType
 import com.fastdrop.transfer.IncomingFileDestination
 import com.fastdrop.transfer.TransferFileSource
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.transfer.TransferOutcome
 import com.fastdrop.transport.Connection
 import com.fastdrop.transport.readExactly
 import kotlinx.coroutines.Dispatchers
@@ -98,6 +99,7 @@ class TransferManagerTest {
         val (peer1, peer2) = createPeers()
         val (rawSender, receiver) = createInMemoryConnectionPair(peer1, peer2)
         val sender = CorruptingChunkConnection(rawSender)
+        var outcome: TransferOutcome? = null
         var aborted = false
         var committed = false
         val destination = object : IncomingFileDestination {
@@ -106,13 +108,14 @@ class TransferManagerTest {
             override suspend fun abort() { aborted = true }
         }
 
-        val sendJob = async(Dispatchers.Default) { manager.sendFile(sender, bufferSource("hash.txt", data)) }
+        val sendJob = async(Dispatchers.Default) { manager.sendFile(sender, bufferSource("hash.txt", data), onOutcome = { outcome = it }) }
         val receiveJob = async(Dispatchers.Default) {
             manager.receiveFile(receiver, { destination })
         }
 
         assertFalse(sendJob.await(), "Sender should receive HASH_MISMATCH")
         assertFalse(receiveJob.await(), "Receiver should reject the corrupted hash")
+        assertEquals(TransferOutcome.HASH_MISMATCH, outcome)
         assertTrue(sender.corrupted)
         assertTrue(aborted)
         assertFalse(committed)
@@ -123,14 +126,16 @@ class TransferManagerTest {
         val manager = TransferManager(chunkSize = 4)
         val (peer1, peer2) = createPeers()
         val (sender, receiver) = createInMemoryConnectionPair(peer1, peer2)
+        var outcome: TransferOutcome? = null
         val sendJob = async(Dispatchers.Default) {
-            manager.sendFile(sender, bufferSource("rejected.txt", "secret".encodeToByteArray()))
+            manager.sendFile(sender, bufferSource("rejected.txt", "secret".encodeToByteArray()), onOutcome = { outcome = it })
         }
         val receiveJob = async(Dispatchers.Default) {
             manager.receiveFile(receiver, { null })
         }
         assertFalse(sendJob.await())
         assertFalse(receiveJob.await())
+        assertEquals(TransferOutcome.REJECTED, outcome)
     }
 
     @Test
@@ -236,6 +241,7 @@ class TransferManagerTest {
     ) = coroutineScope {
         val manager = TransferManager(chunkSize)
         val sink = Buffer()
+        var outcome: TransferOutcome? = null
         val (peer1, peer2) = createPeers()
         val (connection1, connection2) = createInMemoryConnectionPair(peer1, peer2, maxReadSize)
         val provider1 = createTestCryptographyProvider()
@@ -252,7 +258,7 @@ class TransferManagerTest {
         val sendJob = async(Dispatchers.Default) {
             secure1.handshake()
             secure1.confirmPeer()
-            manager.sendFile(secure1, bufferSource(fileName, data))
+            manager.sendFile(secure1, bufferSource(fileName, data), onOutcome = { outcome = it })
         }
         val receiveJob = async(Dispatchers.Default) {
             secure2.handshake()
@@ -261,6 +267,7 @@ class TransferManagerTest {
         }
 
         assertTrue(sendJob.await(), "Sender failed")
+        assertEquals(TransferOutcome.SUCCESS, outcome)
         assertTrue(receiveJob.await(), "Receiver failed")
         assertTrue(data.contentEquals(sink.readByteArray()), "Received data differs")
     }

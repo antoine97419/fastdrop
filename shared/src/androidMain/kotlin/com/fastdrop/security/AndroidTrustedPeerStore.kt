@@ -34,6 +34,14 @@ class AndroidTrustedPeerStore(
         }
     }
 
+    suspend fun trustedNames(): Set<String> = withContext(Dispatchers.IO) {
+        val array = JSONArray(prefs.getString("peers", "[]") ?: "[]")
+        (0 until array.length()).mapNotNull { index ->
+            array.getJSONObject(index).optString("friendlyName").trim()
+                .trimEnd('?', ' ').takeIf { it.isNotBlank() }
+        }.toSet()
+    }
+
     override suspend fun savePeer(peer: TrustedPeer) {
         withContext(Dispatchers.IO) {
             val jsonStr = prefs.getString("peers", "[]")

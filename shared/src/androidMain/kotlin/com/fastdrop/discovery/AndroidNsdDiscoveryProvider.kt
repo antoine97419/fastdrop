@@ -106,7 +106,8 @@ class AndroidNsdDiscoveryProvider(
                             displayName = serviceInfo.serviceName,
                             addresses = listOf(address),
                             port = serviceInfo.port,
-                            source = DiscoveryType.MDNS
+                            source = DiscoveryType.MDNS,
+                            isFastDropService = true
                         )
                         
                         synchronized(currentDiscovered) {

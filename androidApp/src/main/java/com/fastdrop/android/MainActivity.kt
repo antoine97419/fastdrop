@@ -17,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.fastdrop.FastDropDiagnostics
 import com.fastdrop.core.Peer
 import com.fastdrop.core.TransportType
 import com.fastdrop.discovery.AndroidNsdDiscoveryProvider
@@ -25,6 +26,7 @@ import com.fastdrop.security.*
 import com.fastdrop.transfer.AndroidIncomingFileDestination
 import com.fastdrop.transfer.AndroidTransferFileSource
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.transfer.TransferOutcome
 import com.fastdrop.transfer.ControlMessage
 import com.fastdrop.transport.Connection
 import com.fastdrop.transport.GenericLanTransport
@@ -53,6 +55,8 @@ class MainActivity : ComponentActivity() {
     private val discoveredPeers = mutableStateListOf<com.fastdrop.discovery.DiscoveredPeer>()
     private val appState = mutableStateOf("Ready")
     private val progressState = mutableStateOf(0f)
+    private val transferUiState = mutableStateOf<FastDropUiStatus.Transferring?>(null)
+    private val trustedDeviceNames = mutableStateListOf<String>()
     private val sasCodeState = mutableStateOf<String?>(null)
     private var pendingVerification: PeerVerification.NewPeer? = null
     private var pendingSecureChannel: SecureChannel? = null
@@ -62,6 +66,7 @@ class MainActivity : ComponentActivity() {
     private val incomingPeerNameState = mutableStateOf<String?>(null)
     private var legacyPickerPending = false
     private var legacyTransferInProgress = false
+    private var legacySendOutcome: TransferOutcome? = null
     private lateinit var legacySendWorkflow: PickerFirstLegacySendWorkflow<Uri, Connection, SecureChannel>
     
     // File picker launcher
@@ -96,6 +101,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        FastDropDiagnostics.enabled = Log.isLoggable("FastDrop", Log.DEBUG)
         
         // Request permissions
         val permissionsToRequest = mutableListOf(
@@ -134,7 +140,7 @@ class MainActivity : ComponentActivity() {
             // For testing P2P, we just use p2pTransport. (Real app would have a unified transport or selection UI)
             transport = p2pTransport
         } else {
-            Toast.makeText(this, "Wi-Fi Direct unavailable on this device", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Nearby sharing is unavailable on this device", Toast.LENGTH_LONG).show()
             transport = GenericLanTransport(mDNS)
         }
 
@@ -147,9 +153,9 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     FastDropApp(
-                        peers = discoveredPeers,
-                        state = appState.value,
-                        progress = progressState.value,
+                        devices = FastDropUiPresentation.devices(discoveredPeers, trustedDeviceNames.toSet()),
+                        status = FastDropUiPresentation.fromWorkflow(appState.value, discoveredPeers.any { it.isFastDropService }),
+                        transfer = transferUiState.value,
                         sasCode = sasCodeState.value,
                         incomingOffer = incomingOfferState.value,
                         incomingPeerName = incomingPeerNameState.value,
@@ -185,12 +191,13 @@ class MainActivity : ComponentActivity() {
                         },
                         onAcceptOffer = { pendingOfferDecision?.complete(true) },
                         onRejectOffer = { pendingOfferDecision?.complete(false) },
-                        onReceiveFromWindows = { startLegacyGoReceive() },
-                        onLegacyGoClick = {
+                        onReceiveFiles = { startLegacyGoReceive() },
+                        onClearStatus = { appState.value = "Ready" },
+                        onSendFiles = {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                                 startLegacyGoFileSelection()
                             } else {
-                                appState.value = "Legacy GO requires Android 10+"
+                                appState.value = "Transfer failed"
                             }
                         }
                     )
@@ -200,6 +207,15 @@ class MainActivity : ComponentActivity() {
 
         startServer()
         startDiscovery()
+    }
+
+    private fun showProgress(sending: Boolean, fileName: String, peerName: String, current: Long, total: Long) {
+        lifecycleScope.launch(Dispatchers.Main) {
+            if (!appState.value.startsWith(if (sending) "Sending" else "Receiving")) return@launch
+            transferUiState.value = FastDropUiStatus.Transferring(
+                sending, fileName, FastDropUiPresentation.cleanName(peerName), current, total
+            )
+        }
     }
 
     private fun startDiscovery() {
@@ -242,14 +258,16 @@ class MainActivity : ComponentActivity() {
                         }
                         
                         withContext(Dispatchers.Main) { appState.value = "Receiving file..." }
+                        var incomingFileName = "File"
                         val success = transferManager.receiveFile(
                             connection = secureChannel,
                             onOfferReceived = { offer ->
+                                incomingFileName = transferManager.sanitizeFilename(offer.name)
                                 AndroidIncomingFileDestination(this@MainActivity, offer.name)
                             },
                             onProgress = { current, total ->
                                 val pct = if (total > 0) current.toFloat() / total.toFloat() else 0f
-                                lifecycleScope.launch(Dispatchers.Main) { progressState.value = pct }
+                                showProgress(false, incomingFileName, incomingPeerNameState.value ?: "FastDrop device", current, total)
                             }
                         )
                         
@@ -261,10 +279,14 @@ class MainActivity : ComponentActivity() {
                                 appState.value = "Transfer failed."
                             }
                             progressState.value = 0f
+                    transferUiState.value = null
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        withContext(Dispatchers.Main) { appState.value = "Error: ${e.message}" }
+                        withContext(Dispatchers.Main) {
+                    appState.value = "Error: ${e.message}"
+                    transferUiState.value = null
+                }
                     }
                 }
             }
@@ -302,18 +324,20 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) { appState.value = "Sending file..." }
                 val source = AndroidTransferFileSource(this@MainActivity, uri)
                 
+                var sendOutcome: TransferOutcome? = null
                 val success = transferManager.sendFile(
                     connection = secureChannel,
                     fileSource = source,
                     onProgress = { current, total ->
-                        val pct = if (total > 0) current.toFloat() / total.toFloat() else 0f
-                        lifecycleScope.launch(Dispatchers.Main) { progressState.value = pct }
-                    }
+                        showProgress(true, source.name, FastDropUiPresentation.cleanName(discoveredPeer.displayName), current, total)
+                    },
+                    onOutcome = { sendOutcome = it }
                 )
                 
                 withContext(Dispatchers.Main) { 
-                    appState.value = if (success) "Sent successfully!" else "Send failed."
+                    appState.value = FastDropUiPresentation.outcomeLabel(sendOutcome ?: if (success) TransferOutcome.SUCCESS else TransferOutcome.FAILED)
                     progressState.value = 0f
+                            transferUiState.value = null
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -347,6 +371,7 @@ class MainActivity : ComponentActivity() {
             },
             send = { secureChannel, uri ->
                 val source = AndroidTransferFileSource(this@MainActivity, uri)
+                legacySendOutcome = null
                 transferManager.sendFile(
                     connection = secureChannel,
                     fileSource = source,
@@ -354,8 +379,10 @@ class MainActivity : ComponentActivity() {
                         val progress = if (total > 0) current.toFloat() / total.toFloat() else 0f
                         lifecycleScope.launch(Dispatchers.Main) {
                             progressState.value = progress
+                            transferUiState.value = FastDropUiStatus.Transferring(true, source.name, incomingPeerNameState.value ?: "Windows PC", current, total)
                         }
-                    }
+                    },
+                    onOutcome = { legacySendOutcome = it }
                 )
             },
             closeSecure = { secureChannel ->
@@ -366,18 +393,22 @@ class MainActivity : ComponentActivity() {
             },
             updateState = { state ->
                 withContext(Dispatchers.Main) {
-                    appState.value = state
+                    appState.value = if (state == PickerFirstLegacySendWorkflow.SEND_FAILED)
+                        FastDropUiPresentation.outcomeLabel(legacySendOutcome ?: TransferOutcome.FAILED)
+                    else state
                     if (state == PickerFirstLegacySendWorkflow.SENT ||
                         state == PickerFirstLegacySendWorkflow.SEND_FAILED ||
                         state.startsWith("Error:")
                     ) {
                         progressState.value = 0f
+                            transferUiState.value = null
                     }
                 }
             },
             reportCloseError = { closeError ->
-                Log.w("FastDrop", "Failed to close Legacy GO transfer session", closeError)
-            }
+                Log.w("FastDrop", "Failed to close transfer session", closeError)
+            },
+            reportFailure = { Log.e("FastDrop", "Send failed", it) }
         )
 
     private suspend fun authenticateLegacyConnection(rawConnection: Connection): SecureChannel {
@@ -394,6 +425,12 @@ class MainActivity : ComponentActivity() {
             incomingPeerNameState.value = when (verification) {
                 is PeerVerification.NewPeer -> verification.friendlyName
                 is PeerVerification.TrustedPeer -> verification.friendlyName
+            }
+        }
+        if (verification is PeerVerification.TrustedPeer) {
+            withContext(Dispatchers.Main) {
+                val name = FastDropUiPresentation.cleanName(verification.friendlyName)
+                if (name !in trustedDeviceNames) trustedDeviceNames.add(name)
             }
         }
         if (verification is PeerVerification.NewPeer) {
@@ -416,6 +453,10 @@ class MainActivity : ComponentActivity() {
                 throw IllegalStateException("SAS confirmation rejected")
             }
             secureChannel.confirmPeer(verification)
+            withContext(Dispatchers.Main) {
+                val name = FastDropUiPresentation.cleanName(verification.friendlyName)
+                if (name !in trustedDeviceNames) trustedDeviceNames.add(name)
+            }
         }
 
         return secureChannel
@@ -424,7 +465,7 @@ class MainActivity : ComponentActivity() {
     private fun startLegacyGoReceive() {
         if (legacyPickerPending || legacyTransferInProgress) return
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
-            appState.value = "Legacy GO requires Android 10+"
+            appState.value = "Transfer failed"
             return
         }
         legacyTransferInProgress = true
@@ -465,6 +506,7 @@ class MainActivity : ComponentActivity() {
                             lifecycleScope.launch(Dispatchers.Main) {
                                 val percent = if (total > 0) current.toFloat() / total else 1f
                                 progressState.value = percent
+                                transferUiState.value = FastDropUiStatus.Transferring(false, receivedDestination?.displayPath?.substringAfterLast('/') ?: "File", incomingPeerNameState.value ?: "Windows PC", current, total)
                                 appState.value = "Receiving " + (receivedDestination?.displayPath?.substringAfterLast('/') ?: "file") +
                                     " — " + (percent * 100).toInt() + "%"
                             }
@@ -474,7 +516,8 @@ class MainActivity : ComponentActivity() {
                 closeSecure = { it.close() },
                 closeRaw = { it.close() },
                 updateState = { state -> withContext(Dispatchers.Main) { appState.value = state } },
-                reportCloseError = { Log.w("FastDrop", "Failed to close receive session", it) }
+                reportCloseError = { Log.w("FastDrop", "Failed to close receive session", it) },
+                reportFailure = { Log.e("FastDrop", "Receive failed", it) }
             )
             try {
                 val success = workflow.run()
@@ -493,6 +536,7 @@ class MainActivity : ComponentActivity() {
                     incomingOfferState.value = null
                     incomingPeerNameState.value = null
                     progressState.value = 0f
+                            transferUiState.value = null
                     legacyTransferInProgress = false
                 }
             }
@@ -506,82 +550,6 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             discoveryManager.stopAll()
             transport.stop()
-        }
-    }
-}
-
-@Composable
-fun FastDropApp(
-    peers: List<com.fastdrop.discovery.DiscoveredPeer>,
-    state: String,
-    progress: Float,
-    sasCode: String?,
-    incomingOffer: ControlMessage.FileOffer?,
-    incomingPeerName: String?,
-    onAcceptOffer: () -> Unit,
-    onRejectOffer: () -> Unit,
-    onReceiveFromWindows: () -> Unit,
-    onSendClick: (com.fastdrop.discovery.DiscoveredPeer) -> Unit,
-    onAcceptSas: () -> Unit,
-    onRejectSas: () -> Unit,
-    onLegacyGoClick: () -> Unit
-) {
-    Column(modifier = Modifier.padding(16.dp)) {
-        Text("FastDrop", style = MaterialTheme.typography.headlineMedium)
-        
-        Button(onClick = onLegacyGoClick, modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-            Text("Spike: Connect to Windows Legacy GO")
-        }
-        
-        Button(onClick = onReceiveFromWindows, modifier = Modifier.fillMaxWidth()) {
-            Text("Receive from Windows")
-        }
-
-        Spacer(Modifier.height(16.dp))
-        
-        Text("Nearby devices", style = MaterialTheme.typography.titleMedium)
-        if (peers.isEmpty()) {
-            Text("No FastDrop devices found.\nSearching...", color = MaterialTheme.colorScheme.secondary)
-        } else {
-            LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                items(peers) { peer ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onSendClick(peer) }) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(peer.displayName ?: "Unknown Device")
-                            Text("Available", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-            }
-        }
-        
-        if (incomingOffer != null) {
-            AlertDialog(
-                onDismissRequest = onRejectOffer,
-                title = { Text("Incoming file from " + (incomingPeerName ?: "Windows")) },
-                text = { Text(incomingOffer.name + " • " + android.text.format.Formatter.formatShortFileSize(androidx.compose.ui.platform.LocalContext.current, incomingOffer.size)) },
-                confirmButton = { TextButton(onClick = onAcceptOffer) { Text("Accept") } },
-                dismissButton = { TextButton(onClick = onRejectOffer) { Text("Reject") } }
-            )
-        }
-
-        if (sasCode != null) {
-            Card(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Security Code: $sasCode")
-                    Row {
-                        Button(onClick = onAcceptSas) { Text("Accept") }
-                        Spacer(Modifier.width(8.dp))
-                        Button(onClick = onRejectSas) { Text("Reject") }
-                    }
-                }
-            }
-        }
-        
-        Spacer(Modifier.height(16.dp))
-        Text("Status: $state")
-        if (progress > 0f) {
-            LinearProgressIndicator(progress = progress, modifier = Modifier.fillMaxWidth())
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.fastdrop.transfer
 
+import com.fastdrop.FastDropDiagnostics
 import com.fastdrop.transport.Connection
 import com.fastdrop.transport.readExactly
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +18,8 @@ import okio.buffer
 
 data class FileMetadata(val id: String, val name: String, val size: Long)
 
+enum class TransferOutcome { SUCCESS, REJECTED, HASH_MISMATCH, CONNECTION_LOST, FAILED }
+
 class TransferManager(private val chunkSize: Int = 1024 * 1024) {
     private val json = Json { ignoreUnknownKeys = true }
     private val maxControlSize = 64 * 1024
@@ -27,12 +30,12 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
     }
 
     private fun log(side: String, message: String) {
-        println("[FastDrop][Transfer][$side] $message")
+        FastDropDiagnostics.debug("[FastDrop][Transfer][$side] $message")
     }
 
     private fun logException(side: String, exception: Throwable) {
         log(side, "EXCEPTION ${exception::class.simpleName}: ${exception.message}")
-        println(exception.stackTraceToString())
+        if (FastDropDiagnostics.enabled) println(exception.stackTraceToString())
     }
 
     private fun frameTypeName(type: Byte): String = when (type) {
@@ -118,7 +121,8 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
     suspend fun sendFile(
         connection: Connection,
         fileSource: TransferFileSource,
-        onProgress: (Long, Long) -> Unit = { _, _ -> }
+        onProgress: (Long, Long) -> Unit = { _, _ -> },
+        onOutcome: (TransferOutcome) -> Unit = {}
     ): Boolean = withContext(Dispatchers.IO) {
         val metadata = FileMetadata(
             "transfer_${com.fastdrop.utils.getCurrentTimeMillis()}",
@@ -126,6 +130,10 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
             fileSource.size
         )
         var source: Source? = null
+        fun finish(outcome: TransferOutcome): Boolean {
+            runCatching { onOutcome(outcome) }
+            return outcome == TransferOutcome.SUCCESS
+        }
 
         try {
             require(metadata.name.isNotBlank()) { "File name is blank" }
@@ -138,18 +146,18 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
             sendControlMessage(connection, ControlMessage.FileOffer(metadata.id, metadata.name, metadata.size))
 
             log("SEND", "waiting for FILE_ACCEPT")
-            val responseFrame = readFrame(connection, "SEND") ?: return@withContext false
+            val responseFrame = readFrame(connection, "SEND") ?: return@withContext finish(TransferOutcome.CONNECTION_LOST)
             log("SEND", "received frame type=${frameTypeName(responseFrame.first)}")
             if (responseFrame.first != FrameType.CONTROL_MESSAGE) {
                 log("SEND", "expected CONTROL_MESSAGE while waiting for FILE_ACCEPT")
-                return@withContext false
+                return@withContext finish(TransferOutcome.FAILED)
             }
 
             val response = json.decodeFromString<ControlMessage>(responseFrame.second.decodeToString())
             log("SEND", "received control message=${controlMessageName(response)}")
             if (response !is ControlMessage.FileAccept) {
                 log("SEND", "transfer not accepted")
-                return@withContext false
+                return@withContext finish(if (response is ControlMessage.FileReject) TransferOutcome.REJECTED else TransferOutcome.FAILED)
             }
 
             log("SEND", "starting chunks")
@@ -182,15 +190,19 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
             sendControlMessage(connection, ControlMessage.Complete(metadata.id, hash))
 
             log("SEND", "waiting for SUCCESS")
-            val finalFrame = readFrame(connection, "SEND") ?: return@withContext false
+            val finalFrame = readFrame(connection, "SEND") ?: return@withContext finish(TransferOutcome.CONNECTION_LOST)
             log("SEND", "final frame type=${frameTypeName(finalFrame.first)}")
             if (finalFrame.first != FrameType.CONTROL_MESSAGE) {
                 log("SEND", "expected final CONTROL_MESSAGE")
-                return@withContext false
+                return@withContext finish(TransferOutcome.FAILED)
             }
             val finalMessage = json.decodeFromString<ControlMessage>(finalFrame.second.decodeToString())
             log("SEND", "final message=${controlMessageName(finalMessage)}")
-            finalMessage is ControlMessage.Success
+            finish(when (finalMessage) {
+                is ControlMessage.Success -> TransferOutcome.SUCCESS
+                is ControlMessage.HashMismatch -> TransferOutcome.HASH_MISMATCH
+                else -> TransferOutcome.FAILED
+            })
         } catch (exception: Exception) {
             logException("SEND", exception)
             try {
@@ -198,7 +210,9 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
             } catch (sendError: Exception) {
                 logException("SEND", sendError)
             }
-            false
+            finish(if (exception.message?.contains("closed", ignoreCase = true) == true ||
+                exception.message?.contains("reset", ignoreCase = true) == true)
+                TransferOutcome.CONNECTION_LOST else TransferOutcome.FAILED)
         } finally {
             try {
                 source?.close()

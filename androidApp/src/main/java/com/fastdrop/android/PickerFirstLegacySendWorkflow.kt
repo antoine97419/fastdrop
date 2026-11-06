@@ -16,7 +16,8 @@ internal class PickerFirstLegacySendWorkflow<FileRef : Any, RawConnection : Any,
     private val closeSecure: suspend (SecureConnection) -> Unit,
     private val closeRaw: suspend (RawConnection) -> Unit,
     private val updateState: suspend (String) -> Unit,
-    private val reportCloseError: (Throwable) -> Unit = { it.printStackTrace() }
+    private val reportCloseError: (Throwable) -> Unit = { it.printStackTrace() },
+    private val reportFailure: (Throwable) -> Unit = { it.printStackTrace() }
 ) {
     suspend fun startSelection() {
         updateState(SELECTING_FILE)
@@ -50,6 +51,7 @@ internal class PickerFirstLegacySendWorkflow<FileRef : Any, RawConnection : Any,
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (exception: Exception) {
+            reportFailure(exception)
             updateState("Error: ${exception.message ?: exception::class.simpleName}")
             LegacySendResult.FAILED
         } finally {

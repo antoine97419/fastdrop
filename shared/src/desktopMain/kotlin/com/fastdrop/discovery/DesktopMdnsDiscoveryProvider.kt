@@ -70,7 +70,8 @@ class DesktopMdnsDiscoveryProvider(
                 displayName = info.name,
                 addresses = addresses,
                 port = info.port,
-                source = DiscoveryType.MDNS
+                source = DiscoveryType.MDNS,
+                            isFastDropService = true
             )
 
             synchronized(currentDiscovered) {

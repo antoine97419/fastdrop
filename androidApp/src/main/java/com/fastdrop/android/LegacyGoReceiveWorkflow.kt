@@ -11,7 +11,8 @@ internal class LegacyGoReceiveWorkflow<Raw : Any, Secure : Any>(
     private val closeSecure: suspend (Secure) -> Unit,
     private val closeRaw: suspend (Raw) -> Unit,
     private val updateState: suspend (String) -> Unit,
-    private val reportCloseError: (Throwable) -> Unit = { it.printStackTrace() }
+    private val reportCloseError: (Throwable) -> Unit = { it.printStackTrace() },
+    private val reportFailure: (Throwable) -> Unit = { it.printStackTrace() }
 ) {
     suspend fun run(): Boolean {
         var raw: Raw? = null
@@ -26,6 +27,7 @@ internal class LegacyGoReceiveWorkflow<Raw : Any, Secure : Any>(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Exception) {
+            reportFailure(failure)
             updateState("Error: " + (failure.message ?: failure::class.simpleName))
             return false
         } finally {

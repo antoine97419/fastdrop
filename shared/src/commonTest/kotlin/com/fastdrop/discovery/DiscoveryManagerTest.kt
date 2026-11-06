@@ -66,4 +66,18 @@ class DiscoveryManagerTest {
         kotlinx.coroutines.delay(50)
         assertEquals(1, manager.peers.first().size)
     }
+    @Test
+    fun combinesProvidersAndPrefersVerifiedService() = runTest {
+        val mdns = TestDiscoveryProvider()
+        val wifi = TestDiscoveryProvider()
+        val manager = DiscoveryManager(listOf(mdns, wifi))
+        val raw = DiscoveredPeer("pc", "DIRECT-printer", listOf("mac"), 47832, DiscoveryType.WIFI_DIRECT)
+        val verified = raw.copy(displayName = "Windows PC", source = DiscoveryType.MDNS, isFastDropService = true)
+        val phone = DiscoveredPeer("phone", "Pixel", listOf("ip"), 47832, DiscoveryType.MDNS, isFastDropService = true)
+        wifi.updatePeers(listOf(raw))
+        mdns.updatePeers(listOf(verified, phone))
+        val peers = manager.peers.first { it.size == 2 }
+        assertEquals("Windows PC", peers.first { it.discoveryId == "pc" }.displayName)
+        assertEquals(true, peers.first { it.discoveryId == "pc" }.isFastDropService)
+    }
 }

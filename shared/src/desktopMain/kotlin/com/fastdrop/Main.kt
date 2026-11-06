@@ -12,6 +12,7 @@ import com.fastdrop.security.SecureChannel
 import com.fastdrop.transfer.DesktopIncomingFileDestination
 import com.fastdrop.transfer.DesktopTransferFileSource
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.transfer.TransferOutcome
 import com.fastdrop.transport.ManualLanTransport
 import kotlinx.coroutines.runBlocking
 import okio.Path.Companion.toPath
@@ -20,15 +21,23 @@ import java.util.Scanner
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
-fun main(): Unit = runBlocking {
-    println("FastDrop TCP Demo")
-    println("1. Listen (Receiver)")
-    println("2. Connect (Sender)")
-    println("3. Send to Android (Legacy GO)")
+fun main(args: Array<String>): Unit = runBlocking {
+    val developerMode = args.contains("--dev")
+    FastDropDiagnostics.enabled = developerMode || System.getProperty("fastdrop.debug") == "true"
+    println("FastDrop")
+    if (developerMode) {
+        println("1. Listen (Receiver)")
+        println("2. Connect (Sender, manual IP)")
+        println("3. Send to Android (Legacy GO)")
+    } else {
+        println("1. Receive files")
+        println("2. Send file")
+    }
     print("Choice: ")
 
     val scanner = Scanner(System.`in`)
-    val choice = scanner.nextLine().trim()
+    val selectedChoice = scanner.nextLine().trim()
+    val choice = if (!developerMode && selectedChoice == "2") "3" else selectedChoice
 
     val transport = ManualLanTransport(FastDropConfig.DEFAULT_PORT)
     val transferManager = TransferManager()
@@ -50,28 +59,28 @@ fun main(): Unit = runBlocking {
                 }
             } else null
             var targetFile: String? = null
+            var senderOutcome: TransferOutcome? = null
 
             val receiver = PersistentReceiverServer(
                 startHosting = { transport.startHosting() },
                 createSecureChannel = { rawConnection ->
-                    println("Connected by ${rawConnection.peer.address}")
+                    if (developerMode) println("Connected by ${rawConnection.peer.address}") else println("Device connected")
                     SecureChannel(rawConnection, identityStore, trustedPeerStore, deviceInfoProvider)
                 },
                 authenticate = { secureChannel ->
                     println("Authenticating device...")
                     when (val verification = secureChannel.handshake()) {
                         is PeerVerification.TrustedPeer -> {
-                            println("Trusted device:\n${verification.friendlyName} ✓")
+                            println("Trusted device: " + verification.friendlyName.trim().trimEnd('?', ' '))
                             println("Secure connection established.")
                             true
                         }
                         is PeerVerification.NewPeer -> {
-                            println("New device detected:\n${verification.friendlyName}")
-                            println("Fingerprint:\n${verification.fingerprint}")
-                            println("=====================================")
-                            println(" SECURITY CODE: ${verification.sas}")
-                            println("=====================================")
-                            print("Codes match and trust this device? [y/N] ")
+                            println("New device: " + verification.friendlyName.trim().trimEnd('?', ' '))
+                            if (developerMode) println("Fingerprint:\n${verification.fingerprint}")
+                            println("Verify security code")
+                            println(verification.sas)
+                            print("Does this code match on both devices? Trust device? [y/N] ")
                             if (scanner.nextLine().trim().equals("y", ignoreCase = true)) {
                                 secureChannel.confirmPeer(verification)
                                 println("Secure channel established.")
@@ -84,13 +93,15 @@ fun main(): Unit = runBlocking {
                 },
                 receiveTransfer = { secureChannel ->
                     if (outgoingFile != null) {
+                        senderOutcome = null
                         val success = transferManager.sendFile(
                             connection = secureChannel,
                             fileSource = DesktopTransferFileSource(outgoingFile),
                             onProgress = { current, total ->
                                 val percent = if (total > 0) (current.toDouble() / total * 100).roundToInt() else 100
-                                print("\rSending: $current / $total ($percent %)")
-                            }
+                                print("\r" + DesktopPresentation.message(DesktopUiStatus.Sending(outgoingFile.name, percent)))
+                            },
+                            onOutcome = { senderOutcome = it }
                         )
                         println()
                         success
@@ -117,20 +128,31 @@ fun main(): Unit = runBlocking {
                 closeSecureChannel = { it.close() },
                 closeRawConnection = { it.close() },
                 stopHosting = { transport.stop() },
-                onListening = { println(if (outgoingFile != null) "Waiting for Android receiver..." else "Listening for connections...") },
-                onSessionMessage = { println(it) },
-                onCloseError = { println("Failed to close client session: ${it.message}") }
+                onListening = { println(DesktopPresentation.message(if (outgoingFile != null) DesktopUiStatus.WaitingForDevice else DesktopUiStatus.ReadyToReceive)) },
+                onSessionMessage = { message ->
+                    if (developerMode) println(message)
+                    else if (message == "Connection refused.") println("Transfer rejected")
+                    else if (outgoingFile != null) println(DesktopPresentation.message(DesktopPresentation.fromOutcome(senderOutcome ?: TransferOutcome.FAILED)))
+                    else println(if (message.startsWith("Transfer successful")) "Transfer complete" else "Transfer failed")
+                },
+                onCloseError = { if (developerMode) println("Failed to close session: ${it.message}") }
             )
 
             val bridgeManager = WindowsLegacyGoBridgeManager(
-                onStdout = { println("[Bridge] $it") },
-                onStderr = { println("[Bridge][stderr] $it") }
+                onStdout = { if (developerMode) println("[Bridge] $it") },
+                onStderr = { if (developerMode) println("[Bridge][stderr] $it") }
             )
             val runtime = DesktopReceiverRuntime(
                 bridge = bridgeManager,
                 runReceiver = { receiver.run() },
                 stopReceiver = { receiver.stop() },
-                stopDiscovery = { discoveryManager.stopAll() }
+                stopDiscovery = { discoveryManager.stopAll() },
+                log = { message ->
+                    if (developerMode) println(message)
+                    else if (message.startsWith("Wi-Fi Direct bridge stopped")) println("Connection lost")
+                    else if (message.startsWith("Starting")) println("Starting FastDrop…")
+                    else if (message.startsWith("Failed")) println("Transfer failed")
+                }
             )
 
             val shutdownHook = Thread {
@@ -143,7 +165,8 @@ fun main(): Unit = runBlocking {
             try {
                 runtime.run()
             } catch (exception: BridgeException) {
-                println("FastDrop receiver could not start: ${exception.message}")
+                if (developerMode) println("FastDrop could not start: ${exception.message}")
+                else println("FastDrop could not start")
             } finally {
                 runtime.stop()
                 bridgeManager.close()

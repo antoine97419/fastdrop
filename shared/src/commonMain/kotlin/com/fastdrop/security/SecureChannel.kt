@@ -1,5 +1,6 @@
 package com.fastdrop.security
 
+import com.fastdrop.FastDropDiagnostics
 import com.fastdrop.core.Peer
 import com.fastdrop.transport.Connection
 import dev.whyoleg.cryptography.BinarySize.Companion.bytes
@@ -35,12 +36,12 @@ class SecureChannel(
     override val peer: Peer get() = rawConnection.peer
 
     private fun log(message: String) {
-        println("[FastDrop][SecureChannel][${peer.id}] $message")
+        FastDropDiagnostics.debug("[FastDrop][SecureChannel][${peer.id}] $message")
     }
 
     private fun logException(operation: String, exception: Throwable) {
         log("$operation EXCEPTION ${exception::class.simpleName}: ${exception.message}")
-        println(exception.stackTraceToString())
+        if (FastDropDiagnostics.enabled) println(exception.stackTraceToString())
     }
 
     var state: SecureChannelState = SecureChannelState.NEW
