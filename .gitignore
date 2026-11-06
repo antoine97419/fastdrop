@@ -15,3 +15,7 @@ androidApp/build/
 shared/build/
 shared/bridge/windows/bin/
 shared/bridge/windows/obj/
+/.android-home/
+/.codex-android-home/
+/.codex-gradle-home/
+/.kotlin/
