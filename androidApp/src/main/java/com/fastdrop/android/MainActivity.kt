@@ -3,6 +3,7 @@ package com.fastdrop.android
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,8 +25,10 @@ import com.fastdrop.security.*
 import com.fastdrop.transfer.AndroidIncomingFileDestination
 import com.fastdrop.transfer.AndroidTransferFileSource
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.transport.Connection
 import com.fastdrop.transport.GenericLanTransport
 import dev.whyoleg.cryptography.CryptographyProvider
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
@@ -51,11 +54,26 @@ class MainActivity : ComponentActivity() {
     private val sasCodeState = mutableStateOf<String?>(null)
     private var pendingVerification: PeerVerification.NewPeer? = null
     private var pendingSecureChannel: SecureChannel? = null
-    private var activeLegacySecureChannel: SecureChannel? = null
+    private var pendingLegacySasDecision: CompletableDeferred<Boolean>? = null
+    private var legacyPickerPending = false
+    private var legacyTransferInProgress = false
+    private lateinit var legacySendWorkflow: PickerFirstLegacySendWorkflow<Uri, Connection, SecureChannel>
     
     // File picker launcher
     private val pickFileLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) {
+        if (legacyPickerPending) {
+            legacyPickerPending = false
+            legacyTransferInProgress = true
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    legacySendWorkflow.onPickerResult(uri)
+                } finally {
+                    withContext(Dispatchers.Main) {
+                        legacyTransferInProgress = false
+                    }
+                }
+            }
+        } else if (uri != null) {
             val selectedPeer = selectedPeerForTransfer
             if (selectedPeer != null) {
                 sendFile(uri, selectedPeer)
@@ -115,6 +133,7 @@ class MainActivity : ComponentActivity() {
         // Combine discovery
         discoveryManager = DiscoveryManager(discoveryProviders)
         transferManager = TransferManager()
+        legacySendWorkflow = createLegacySendWorkflow()
         
         setContent {
             MaterialTheme {
@@ -125,31 +144,38 @@ class MainActivity : ComponentActivity() {
                         progress = progressState.value,
                         sasCode = sasCodeState.value,
                         onSendClick = { peer -> 
+                            appState.value = PickerFirstLegacySendWorkflow.SELECTING_FILE
                             selectedPeerForTransfer = peer
                             pickFileLauncher.launch("*/*") 
                         },
                         onAcceptSas = {
-                            val verif = pendingVerification
-                            val chan = pendingSecureChannel
-                            if (verif != null && chan != null) {
-                                lifecycleScope.launch(Dispatchers.IO) {
-                                    chan.confirmPeer(verif)
-                                    // Continuer le transfert s'il était bloqué,
-                                    // Mais wait, dans mon archi, confirmPeer débloque et l'appelant continue!
-                                    // Donc juste appeler ça va débloquer.
+                            val legacyDecision = pendingLegacySasDecision
+                            if (legacyDecision != null) {
+                                legacyDecision.complete(true)
+                            } else {
+                                val verif = pendingVerification
+                                val chan = pendingSecureChannel
+                                if (verif != null && chan != null) {
+                                    lifecycleScope.launch(Dispatchers.IO) {
+                                        chan.confirmPeer(verif)
+                                    }
+                                    sasCodeState.value = null
+                                    pendingVerification = null
                                 }
+                            }
+                        },
+                        onRejectSas = {
+                            val legacyDecision = pendingLegacySasDecision
+                            if (legacyDecision != null) {
+                                legacyDecision.complete(false)
+                            } else {
                                 sasCodeState.value = null
                                 pendingVerification = null
                             }
                         },
-                        onRejectSas = {
-                            sasCodeState.value = null
-                            pendingVerification = null
-                            // In real app, close connection
-                        },
                         onLegacyGoClick = {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                                connectToLegacyGo()
+                                startLegacyGoFileSelection()
                             } else {
                                 appState.value = "Legacy GO requires Android 10+"
                             }
@@ -238,33 +264,26 @@ class MainActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) { appState.value = "Connecting to ${discoveredPeer.displayName}..." }
                 val targetIp = discoveredPeer.addresses.firstOrNull() ?: return@launch
                 
-                val secureChannel = if (discoveredPeer.discoveryId == "windows-legacy-go" && activeLegacySecureChannel != null) {
-                    activeLegacySecureChannel!!
+                val transportType = if (discoveredPeer.source == com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT) {
+                    TransportType.WIFI_DIRECT
                 } else {
-                    val transportType = if (discoveredPeer.source == com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT) {
-                        TransportType.WIFI_DIRECT
-                    } else {
-                        TransportType.LAN
+                    TransportType.LAN
+                }
+                val peer = Peer(discoveredPeer.discoveryId, discoveredPeer.displayName ?: "Target", transportType, targetIp)
+                val rawConn = transport.connect(peer)
+
+                withContext(Dispatchers.Main) { appState.value = "Authenticating..." }
+                val secureChannel = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
+
+                val verification = secureChannel.handshake()
+                if (verification is PeerVerification.NewPeer) {
+                    withContext(Dispatchers.Main) {
+                        pendingVerification = verification
+                        pendingSecureChannel = secureChannel
+                        sasCodeState.value = verification.sas
+                        appState.value = "Waiting for SAS confirmation..."
                     }
-                    val peer = Peer(discoveredPeer.discoveryId, discoveredPeer.displayName ?: "Target", transportType, targetIp)
-                    val rawConn = transport.connect(peer)
-                    
-                    withContext(Dispatchers.Main) { appState.value = "Authenticating..." }
-                    val sc = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
-                    
-                    val verification = sc.handshake()
-                    if (verification is PeerVerification.NewPeer) {
-                        withContext(Dispatchers.Main) { 
-                            pendingVerification = verification
-                            pendingSecureChannel = sc
-                            sasCodeState.value = verification.sas
-                            appState.value = "Waiting for SAS confirmation..."
-                        }
-                        while (pendingVerification != null) { kotlinx.coroutines.delay(100) }
-                    } else {
-                        // nothing
-                    }
-                    sc
+                    while (pendingVerification != null) { kotlinx.coroutines.delay(100) }
                 }
 
                 withContext(Dispatchers.Main) { appState.value = "Sending file..." }
@@ -290,60 +309,101 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @android.annotation.SuppressLint("NewApi")
-    private fun connectToLegacyGo() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                withContext(Dispatchers.Main) { appState.value = "Requesting Windows Legacy GO Network..." }
-                val connector = com.fastdrop.transport.AndroidLegacyGoConnector(this@MainActivity)
-                val rawConn = connector.connect()
-                
-                withContext(Dispatchers.Main) { appState.value = "Authenticating with Windows..." }
-                val secureChannel = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
-                
-                val verification = secureChannel.handshake()
-                if (verification is PeerVerification.NewPeer) {
-                    withContext(Dispatchers.Main) { 
-                        pendingVerification = verification
-                        pendingSecureChannel = secureChannel
-                        sasCodeState.value = verification.sas
-                        appState.value = "Waiting for SAS confirmation..."
-                    }
-                    while (pendingVerification != null) { kotlinx.coroutines.delay(100) }
-                } else {
-                    withContext(Dispatchers.Main) { appState.value = "Trusted peer connected." }
-                }
+    private fun startLegacyGoFileSelection() {
+        if (legacyPickerPending || legacyTransferInProgress) return
 
-                withContext(Dispatchers.Main) { appState.value = "Handshake Success! SecureChannel Ready." }
-                
-                activeLegacySecureChannel = secureChannel
-                
-                // Add this Windows peer to the UI list so the user can click it to send a file
-                val windowPeer = com.fastdrop.discovery.DiscoveredPeer(
-                    discoveryId = "windows-legacy-go",
-                    displayName = "Windows PC (Legacy GO)",
-                    addresses = listOf("192.168.137.1"),
-                    port = 47832,
-                    source = com.fastdrop.discovery.DiscoveryType.WIFI_DIRECT,
-                    protocolVersion = 1
-                )
-                
-                // For simplicity, we just trigger the file picker immediately
-                withContext(Dispatchers.Main) { 
-                    selectedPeerForTransfer = windowPeer
-                    // Also we need to make sendFile reuse the established SecureChannel
-                    // Or we let sendFile initiate a new connection?
-                    // Actually, if we just want to test Android -> Windows:
-                    pickFileLauncher.launch("*/*") 
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                withContext(Dispatchers.Main) { appState.value = "Error: ${e.message}" }
-            }
+        legacyPickerPending = true
+        selectedPeerForTransfer = null
+        lifecycleScope.launch(Dispatchers.Main) {
+            legacySendWorkflow.startSelection()
         }
     }
 
+    private fun createLegacySendWorkflow() =
+        PickerFirstLegacySendWorkflow<Uri, Connection, SecureChannel>(
+            openPicker = {
+                withContext(Dispatchers.Main) {
+                    pickFileLauncher.launch("*/*")
+                }
+            },
+            connect = {
+                com.fastdrop.transport.AndroidLegacyGoConnector(this@MainActivity).connect()
+            },
+            authenticate = { rawConnection ->
+                authenticateLegacyConnection(rawConnection)
+            },
+            send = { secureChannel, uri ->
+                val source = AndroidTransferFileSource(this@MainActivity, uri)
+                transferManager.sendFile(
+                    connection = secureChannel,
+                    fileSource = source,
+                    onProgress = { current, total ->
+                        val progress = if (total > 0) current.toFloat() / total.toFloat() else 0f
+                        lifecycleScope.launch(Dispatchers.Main) {
+                            progressState.value = progress
+                        }
+                    }
+                )
+            },
+            closeSecure = { secureChannel ->
+                secureChannel.close()
+            },
+            closeRaw = { rawConnection ->
+                rawConnection.close()
+            },
+            updateState = { state ->
+                withContext(Dispatchers.Main) {
+                    appState.value = state
+                    if (state == PickerFirstLegacySendWorkflow.SENT ||
+                        state == PickerFirstLegacySendWorkflow.SEND_FAILED ||
+                        state.startsWith("Error:")
+                    ) {
+                        progressState.value = 0f
+                    }
+                }
+            },
+            reportCloseError = { closeError ->
+                Log.w("FastDrop", "Failed to close Legacy GO transfer session", closeError)
+            }
+        )
+
+    private suspend fun authenticateLegacyConnection(rawConnection: Connection): SecureChannel {
+        val secureChannel = SecureChannel(
+            rawConnection,
+            identityStore,
+            peerStore,
+            deviceInfoProvider,
+            cryptoProvider
+        )
+
+        val verification = secureChannel.handshake()
+        if (verification is PeerVerification.NewPeer) {
+            val decision = CompletableDeferred<Boolean>()
+            withContext(Dispatchers.Main) {
+                pendingLegacySasDecision = decision
+                sasCodeState.value = verification.sas
+            }
+
+            val accepted = try {
+                decision.await()
+            } finally {
+                withContext(Dispatchers.Main) {
+                    pendingLegacySasDecision = null
+                    sasCodeState.value = null
+                }
+            }
+
+            if (!accepted) {
+                throw IllegalStateException("SAS confirmation rejected")
+            }
+            secureChannel.confirmPeer(verification)
+        }
+
+        return secureChannel
+    }
+
     override fun onDestroy() {
+        pendingLegacySasDecision?.complete(false)
         super.onDestroy()
         lifecycleScope.launch(Dispatchers.IO) {
             discoveryManager.stopAll()
