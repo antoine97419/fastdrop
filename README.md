@@ -10,7 +10,11 @@ Le TXT mDNS contient `version=1`, `deviceId` (SHA-256 public de la clé Ed25519,
 
 Sur le même LAN, Android affiche uniquement les services FastDrop résolus par NSD. Un SSID Wi-Fi Direct seul ne devient pas une carte FastDrop. La découverte hors LAN commun et le choix automatique du transport restent à faire.
 
-L'envoi Windows vers Android utilise encore le workflow Legacy GO validé : sélectionner un fichier sur Windows, puis lancer `Receive files` sur Android. Selon l'ordre des actions, la session peut attendre le second appareil. La négociation automatique des rôles après SecureChannel est prévue séparément. L'envoi Android vers Windows utilise l'adresse LAN découverte et le listener Desktop permanent.
+Sur un LAN commun, chaque application écoute en permanence sur le port FastDrop. L'émetteur choisit d'abord son fichier, puis ouvre un nouveau TCP et un nouveau SecureChannel. La négociation de session précède `FILE_OFFER` : `HELLO(version=1)` dans les deux sens, `SEND_INTENT`, puis `READY` ou `BUSY`. Pour Windows → Android, Android initie aussi une session préparée avec `RECEIVE_READY` ; Windows répond ultérieurement par `SEND_INTENT`, puis Android par `READY` ou `BUSY`. `CANCEL(reason)` couvre les versions incompatibles et les intents invalides. Ces messages JSON typés sont transportés par une trame de session de quatre octets de longueur, distincte des trames de fichier inchangées. Une session est fermée après un transfert.
+
+Le TXT mDNS inclut `sessionVersion=1`. Une annonce ancienne sans ce champ reste visible, mais le flux automatique refuse de lui envoyer une négociation qu'elle ne comprend pas. L'écran Android ne demande plus `Receive files` : un listener LAN reçoit l'offre et affiche Accept / Reject. Une seule session de transfert est active par appareil ; une seconde demande reçoit `BUSY`.
+
+Le Wi-Fi Direct Legacy GO conserve son sens de connexion Android vers Windows. Le flux automatique Windows vers Android utilise le LAN commun ; sans LAN, le fallback Wi-Fi Direct automatique nécessite encore un canal de contrôle ou un mécanisme d'intention supplémentaire. Le CLI de diagnostic et les anciens workflows de transfert restent séparés.
 
 FastDrop est un projet étudiant (SAE BUT Réseaux & Télécommunications) visant à créer une application de transfert de fichiers peer-to-peer (P2P) multiplateforme.
 L'objectif est d'offrir une expérience similaire à AirDrop, fonctionnant entre Android et Windows, même en l'absence totale d'infrastructure réseau (pas de routeur, pas de connexion Internet).

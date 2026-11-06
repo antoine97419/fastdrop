@@ -20,7 +20,6 @@ internal fun FastDropApp(
     incomingPeerName: String?,
     onAcceptOffer: () -> Unit,
     onRejectOffer: () -> Unit,
-    onReceiveFiles: () -> Unit,
     onSendClick: (com.fastdrop.discovery.DiscoveredPeer) -> Unit,
     onAcceptSas: () -> Unit,
     onRejectSas: () -> Unit,
@@ -35,6 +34,7 @@ internal fun FastDropApp(
             status is FastDropUiStatus.Failed ||
             status is FastDropUiStatus.ConnectionLost ||
             status is FastDropUiStatus.IntegrityFailed
+            || status is FastDropUiStatus.Busy
         ) {
             kotlinx.coroutines.delay(6_000)
             onClearStatus()
@@ -47,11 +47,7 @@ internal fun FastDropApp(
         Text("Share files with nearby devices", color = MaterialTheme.colorScheme.secondary)
 
         Spacer(Modifier.height(24.dp))
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = onSendFiles, modifier = Modifier.weight(1f)) { Text("Send files") }
-            Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = onReceiveFiles, modifier = Modifier.weight(1f)) { Text("Receive files") }
-        }
+        Button(onClick = onSendFiles, modifier = Modifier.fillMaxWidth()) { Text("Send files") }
 
         Spacer(Modifier.height(28.dp))
         Text("Nearby devices", style = MaterialTheme.typography.titleLarge)
@@ -107,6 +103,8 @@ internal fun FastDropApp(
                 FastDropUiStatus.Idle -> null
                 FastDropUiStatus.Searching -> "Searching for devices…"
                 FastDropUiStatus.Selecting -> "Selecting file…"
+                FastDropUiStatus.SelectPeer -> "Select a nearby device"
+                FastDropUiStatus.Busy -> "Device busy"
                 FastDropUiStatus.Connecting -> "Connecting…"
                 FastDropUiStatus.Authenticating -> "Authenticating…"
                 FastDropUiStatus.WaitingForApproval -> "Waiting for approval…"

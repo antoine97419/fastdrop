@@ -8,8 +8,9 @@ class FastDropServiceRecordTest {
     private val id = "AA:".repeat(31) + "AA"
 
     @Test fun roundTripKeepsPublicIdentityAndCapabilities() {
-        val record = FastDropServiceRecord(1, id, "Laptop-Moufitss", setOf("send", "receive"))
+        val record = FastDropServiceRecord(1, id, "Laptop-Moufitss", setOf("send", "receive"), 1)
         assertEquals(record, FastDropServiceRecord.parse(record.txt(), "other instance"))
+        assertEquals(null, FastDropServiceRecord.parse(mapOf("version" to "1"), "old peer")?.sessionVersion)
     }
 
     @Test fun rejectsUnconfirmedServiceAndCleansName() {

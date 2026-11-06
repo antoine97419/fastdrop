@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
@@ -33,11 +35,10 @@ internal class PersistentReceiverServer<RawConnection : Any, SecureConnection : 
 
         try {
             onListening()
-            startHosting().collect { rawConnection ->
-                if (!stopping) {
-                    handleClient(rawConnection)
-                } else {
-                    closeSafely { closeRawConnection(rawConnection) }
+            coroutineScope {
+                startHosting().collect { rawConnection ->
+                    if (!stopping) launch { handleClient(rawConnection) }
+                    else closeSafely { closeRawConnection(rawConnection) }
                 }
             }
         } catch (cancellation: CancellationException) {

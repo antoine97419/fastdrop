@@ -25,7 +25,7 @@ class DesktopMdnsDiscoveryProvider(
     private var started = false
 
     fun advertisedRecord() = FastDropServiceRecord(
-        1, localDeviceId, localFriendlyName, setOf("send", "receive")
+        1, localDeviceId, localFriendlyName, setOf("send", "receive"), 1
     )
 
     private fun key(event: ServiceEvent) = event.dns.inetAddress.hostAddress + "/" + event.name
@@ -41,7 +41,7 @@ class DesktopMdnsDiscoveryProvider(
         }
         override fun serviceResolved(event: ServiceEvent) {
             val info = event.info ?: return
-            val txt = listOf("version", "deviceId", "name", "capabilities")
+            val txt = listOf("version", "deviceId", "name", "capabilities", "sessionVersion")
                 .associateWith { info.getPropertyString(it) ?: "" }
             val record = FastDropServiceRecord.parse(txt, info.name) ?: return
             if (record.deviceId != null && record.deviceId == localDeviceId) return
@@ -49,7 +49,7 @@ class DesktopMdnsDiscoveryProvider(
             val addresses = info.inet4Addresses.map { it.hostAddress }
             if (addresses.isEmpty()) return
             val peer = DiscoveredPeer(info.name, record.name, addresses, info.port,
-                DiscoveryType.MDNS, record.version, true, record.deviceId, record.capabilities)
+                DiscoveryType.MDNS, record.version, true, record.deviceId, record.capabilities, record.sessionVersion)
             synchronized(found) {
                 found[key(event)] = peer
                 state.value = found.values.distinctBy { it.deviceId ?: it.discoveryId }

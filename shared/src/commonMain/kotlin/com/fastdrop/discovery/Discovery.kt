@@ -19,7 +19,8 @@ data class DiscoveredPeer(
     val protocolVersion: Int = 1,
     val isFastDropService: Boolean = false,
     val deviceId: String? = null,
-    val capabilities: Set<String> = emptySet()
+    val capabilities: Set<String> = emptySet(),
+    val sessionVersion: Int? = null
 )
 
 interface DiscoveryProvider {

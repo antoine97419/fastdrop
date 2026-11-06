@@ -49,9 +49,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var transport: com.fastdrop.transport.Transport
     private lateinit var transferManager: TransferManager
     private lateinit var cryptoProvider: CryptographyProvider
+    private lateinit var lanRuntime: AndroidFastDropRuntime
 
     private var serverJob: Job? = null
-    private var discoveryJob: Job? = null
     
     // UI States
     private val discoveredPeers = mutableStateListOf<com.fastdrop.discovery.DiscoveredPeer>()
@@ -63,6 +63,7 @@ class MainActivity : ComponentActivity() {
     private var pendingVerification: PeerVerification.NewPeer? = null
     private var pendingSecureChannel: SecureChannel? = null
     private var pendingLegacySasDecision: CompletableDeferred<Boolean>? = null
+    private var pendingSessionSasDecision: CompletableDeferred<Boolean>? = null
     private var pendingOfferDecision: CompletableDeferred<Boolean>? = null
     private val incomingOfferState = mutableStateOf<ControlMessage.FileOffer?>(null)
     private val incomingPeerNameState = mutableStateOf<String?>(null)
@@ -88,7 +89,10 @@ class MainActivity : ComponentActivity() {
         } else if (uri != null) {
             val selectedPeer = selectedPeerForTransfer
             if (selectedPeer != null) {
-                sendFile(uri, selectedPeer)
+                if (selectedPeer.source == com.fastdrop.discovery.DiscoveryType.MDNS &&
+                    selectedPeer.sessionVersion == com.fastdrop.session.SessionProtocol.VERSION)
+                    lanRuntime.send(uri, selectedPeer)
+                else sendFile(uri, selectedPeer)
             }
         }
     }
@@ -156,6 +160,74 @@ class MainActivity : ComponentActivity() {
         }
         transferManager = TransferManager()
         legacySendWorkflow = createLegacySendWorkflow()
+        lanRuntime = AndroidFastDropRuntime(this, identityStore, peerStore, deviceInfoProvider,
+            cryptoProvider, discoveryManager,
+            onPeers = { peers, trustedNames ->
+                discoveredPeers.clear()
+                discoveredPeers.addAll(peers)
+                trustedNames.forEach { name ->
+                    val clean = FastDropUiPresentation.cleanName(name)
+                    if (clean !in trustedDeviceNames) trustedDeviceNames.add(clean)
+                }
+            },
+            verifySas = { verification ->
+                val decision = CompletableDeferred<Boolean>()
+                withContext(Dispatchers.Main) {
+                    pendingSessionSasDecision = decision
+                    sasCodeState.value = verification.sas
+                    incomingPeerNameState.value = verification.friendlyName
+                }
+                try { decision.await() } finally {
+                    withContext(NonCancellable + Dispatchers.Main) {
+                        pendingSessionSasDecision = null
+                        sasCodeState.value = null
+                    }
+                }
+            },
+            approveOffer = { offer, peerName ->
+                val decision = CompletableDeferred<Boolean>()
+                withContext(Dispatchers.Main) {
+                    pendingOfferDecision = decision
+                    incomingOfferState.value = offer
+                    incomingPeerNameState.value = peerName
+                }
+                try { decision.await() } finally {
+                    withContext(NonCancellable + Dispatchers.Main) {
+                        pendingOfferDecision = null
+                        incomingOfferState.value = null
+                    }
+                }
+            },
+            update = { status ->
+                lifecycleScope.launch(Dispatchers.Main) {
+                    when (status) {
+                        AndroidSessionStatus.Ready -> appState.value = "Ready"
+                        is AndroidSessionStatus.Connecting -> appState.value = "Connecting to ${status.peer}..."
+                        is AndroidSessionStatus.Authenticating -> {
+                            incomingPeerNameState.value = status.peer
+                            appState.value = "Authenticating ${status.peer}..."
+                        }
+                        is AndroidSessionStatus.Sending -> {
+                            appState.value = "Sending ${status.file}"
+                            transferUiState.value = FastDropUiStatus.Transferring(true, status.file,
+                                incomingPeerNameState.value ?: "FastDrop device", status.current, status.total)
+                        }
+                        is AndroidSessionStatus.Receiving -> {
+                            appState.value = "Receiving ${status.file}"
+                            transferUiState.value = FastDropUiStatus.Transferring(false, status.file,
+                                incomingPeerNameState.value ?: "FastDrop device", status.current, status.total)
+                        }
+                        is AndroidSessionStatus.Completed -> appState.value = "Transfer success! ${status.file}"
+                        AndroidSessionStatus.Busy -> appState.value = "Device busy"
+                        AndroidSessionStatus.Rejected -> appState.value = "Transfer rejected"
+                        AndroidSessionStatus.IntegrityFailed -> appState.value = "File integrity check failed"
+                        AndroidSessionStatus.ConnectionLost -> appState.value = "Connection lost"
+                        is AndroidSessionStatus.Error -> appState.value = "Error: ${status.message}"
+                    }
+                    if (status !is AndroidSessionStatus.Sending && status !is AndroidSessionStatus.Receiving)
+                        transferUiState.value = null
+                }
+            })
         
         setContent {
             MaterialTheme {
@@ -173,8 +245,11 @@ class MainActivity : ComponentActivity() {
                             pickFileLauncher.launch("*/*") 
                         },
                         onAcceptSas = {
+                            val sessionDecision = pendingSessionSasDecision
                             val legacyDecision = pendingLegacySasDecision
-                            if (legacyDecision != null) {
+                            if (sessionDecision != null) {
+                                sessionDecision.complete(true)
+                            } else if (legacyDecision != null) {
                                 legacyDecision.complete(true)
                             } else {
                                 val verif = pendingVerification
@@ -189,8 +264,11 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onRejectSas = {
+                            val sessionDecision = pendingSessionSasDecision
                             val legacyDecision = pendingLegacySasDecision
-                            if (legacyDecision != null) {
+                            if (sessionDecision != null) {
+                                sessionDecision.complete(false)
+                            } else if (legacyDecision != null) {
                                 legacyDecision.complete(false)
                             } else {
                                 sasCodeState.value = null
@@ -199,14 +277,14 @@ class MainActivity : ComponentActivity() {
                         },
                         onAcceptOffer = { pendingOfferDecision?.complete(true) },
                         onRejectOffer = { pendingOfferDecision?.complete(false) },
-                        onReceiveFiles = { startLegacyGoReceive() },
                         onClearStatus = { appState.value = "Ready" },
                         onSendFiles = {
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                                startLegacyGoFileSelection()
-                            } else {
-                                appState.value = "Transfer failed"
-                            }
+                            val candidates = discoveredPeers.filter { it.isFastDropService &&
+                                it.sessionVersion == com.fastdrop.session.SessionProtocol.VERSION }
+                            if (candidates.size == 1) {
+                                selectedPeerForTransfer = candidates.single()
+                                pickFileLauncher.launch("*/*")
+                            } else appState.value = "Select a nearby device"
                         }
                     )
                 }
@@ -214,7 +292,7 @@ class MainActivity : ComponentActivity() {
         }
 
         startServer()
-        startDiscovery()
+        lanRuntime.start()
     }
 
     private fun showProgress(sending: Boolean, fileName: String, peerName: String, current: Long, total: Long) {
@@ -223,27 +301,6 @@ class MainActivity : ComponentActivity() {
             transferUiState.value = FastDropUiStatus.Transferring(
                 sending, fileName, FastDropUiPresentation.cleanName(peerName), current, total
             )
-        }
-    }
-
-    private fun startDiscovery() {
-        discoveryJob = lifecycleScope.launch(Dispatchers.Main.immediate) {
-            discoveryManager.startAll()
-            discoveryManager.peers.collect { list ->
-                val trustedNames = withContext(Dispatchers.IO) {
-                    list.filter { it.isFastDropService && it.deviceId != null }
-                        .filter { peerStore.getPeer(it.deviceId!!) != null }
-                        .mapNotNull { it.displayName }
-                }
-                withContext(Dispatchers.Main) {
-                    discoveredPeers.clear()
-                    discoveredPeers.addAll(list)
-                    trustedNames.forEach { name ->
-                        val clean = FastDropUiPresentation.cleanName(name)
-                        if (clean !in trustedDeviceNames) trustedDeviceNames.add(clean)
-                    }
-                }
-            }
         }
     }
 
@@ -564,10 +621,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         pendingLegacySasDecision?.complete(false)
+        pendingSessionSasDecision?.complete(false)
         pendingOfferDecision?.complete(false)
-        discoveryJob?.cancel()
         kotlinx.coroutines.runBlocking {
-            discoveryManager.stopAll()
+            lanRuntime.stop()
             transport.stop()
         }
         super.onDestroy()

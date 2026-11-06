@@ -5,13 +5,15 @@ data class FastDropServiceRecord(
     val version: Int,
     val deviceId: String?,
     val name: String,
-    val capabilities: Set<String>
+    val capabilities: Set<String>,
+    val sessionVersion: Int? = null
 ) {
     fun txt(): Map<String, String> = mapOf(
         "version" to version.toString(),
         "deviceId" to (deviceId ?: ""),
         "name" to name,
-        "capabilities" to capabilities.sorted().joinToString(",")
+        "capabilities" to capabilities.sorted().joinToString(","),
+        "sessionVersion" to (sessionVersion?.toString() ?: "")
     )
 
     companion object {
@@ -23,7 +25,7 @@ data class FastDropServiceRecord(
                 .trim().trimEnd('?', ' ').takeIf { it.isNotBlank() } ?: return null
             return FastDropServiceRecord(1, id, name,
                 txt["capabilities"]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
-                    ?: emptySet())
+                    ?: emptySet(), txt["sessionVersion"]?.toIntOrNull())
         }
     }
 }

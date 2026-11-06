@@ -16,6 +16,8 @@ internal sealed interface FastDropUiStatus {
     data object Idle : FastDropUiStatus
     data object Searching : FastDropUiStatus
     data object Selecting : FastDropUiStatus
+    data object SelectPeer : FastDropUiStatus
+    data object Busy : FastDropUiStatus
     data object Connecting : FastDropUiStatus
     data object Authenticating : FastDropUiStatus
     data object WaitingForApproval : FastDropUiStatus
@@ -58,6 +60,8 @@ internal object FastDropUiPresentation {
     fun fromWorkflow(raw: String, hasDevices: Boolean): FastDropUiStatus = when {
         raw == "Ready" -> if (hasDevices) FastDropUiStatus.Idle else FastDropUiStatus.Searching
         raw.startsWith("Selecting") -> FastDropUiStatus.Selecting
+        raw.startsWith("Select a nearby device") -> FastDropUiStatus.SelectPeer
+        raw == "Device busy" -> FastDropUiStatus.Busy
         raw.startsWith("Connecting") -> FastDropUiStatus.Connecting
         raw.startsWith("Authenticating") -> FastDropUiStatus.Authenticating
         raw.contains("SAS", ignoreCase = true) -> FastDropUiStatus.WaitingForApproval

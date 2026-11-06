@@ -35,7 +35,7 @@ class AndroidNsdDiscoveryProvider private constructor(
 
     private fun registerService() {
         check(registrationListener == null) { "NSD registration is still active" }
-        val record = FastDropServiceRecord(1, localDeviceId, localFriendlyName, setOf("send", "receive"))
+        val record = FastDropServiceRecord(1, localDeviceId, localFriendlyName, setOf("send", "receive"), 1)
         val info = NsdServiceInfo().apply {
             serviceName = localFriendlyName
             serviceType = this@AndroidNsdDiscoveryProvider.serviceType
@@ -115,7 +115,7 @@ class AndroidNsdDiscoveryProvider private constructor(
                     }
                     override fun onServiceResolved(info: NsdServiceInfo) {
                         if (discoveryListener !== browseListener) return
-                        val txt = listOf("version", "deviceId", "name", "capabilities")
+                        val txt = listOf("version", "deviceId", "name", "capabilities", "sessionVersion")
                             .associateWith { key -> info.attributes[key]?.toString(Charsets.UTF_8) ?: "" }
                         val record = FastDropServiceRecord.parse(txt, info.serviceName) ?: return
                         if (record.deviceId == localDeviceId) {
@@ -124,7 +124,7 @@ class AndroidNsdDiscoveryProvider private constructor(
                         }
                         val address = info.host?.hostAddress ?: return
                         val peer = DiscoveredPeer(info.serviceName, record.name, listOf(address), info.port,
-                            DiscoveryType.MDNS, record.version, true, record.deviceId, record.capabilities)
+                            DiscoveryType.MDNS, record.version, true, record.deviceId, record.capabilities, record.sessionVersion)
                         synchronized(found) {
                             found[info.serviceName] = peer
                             state.value = mergeDiscoveredPeers(found.values.toList(), localDeviceId) {

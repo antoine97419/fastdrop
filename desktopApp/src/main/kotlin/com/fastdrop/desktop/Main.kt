@@ -27,7 +27,9 @@ fun main() = application {
                 Spacer(Modifier.height(12.dp))
                 Text(when (val status = state.status) {
                     DesktopStatus.Starting -> "Starting..."
-                    DesktopStatus.Ready -> "Ready to receive"
+                    DesktopStatus.Ready -> "Ready"
+                    is DesktopStatus.Connecting -> "Connecting to ${status.peer}"
+                    DesktopStatus.Busy -> "Device busy"
                     is DesktopStatus.WaitingForDevice -> "Waiting for device... ${status.file}"
                     is DesktopStatus.Authenticating -> "Authenticating ${status.peer}"
                     is DesktopStatus.Sending -> "Sending ${status.file}"
@@ -62,7 +64,7 @@ fun main() = application {
                                     val dialog = FileDialog(null as Frame?, "Send files", FileDialog.LOAD)
                                     dialog.isVisible = true
                                     val name = dialog.file
-                                    if (name != null) viewModel.send(java.io.File(dialog.directory, name))
+                                    if (name != null) viewModel.send(java.io.File(dialog.directory, name), peer.deviceId)
                                     dialog.dispose()
                                 }) { Text("Send files") }
                             }

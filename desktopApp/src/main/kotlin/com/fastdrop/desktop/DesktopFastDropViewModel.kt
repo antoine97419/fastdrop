@@ -9,7 +9,7 @@ class DesktopFastDropViewModel(private val runtime: DesktopFastDropRuntime = Des
     val state: StateFlow<DesktopUiState> = runtime.state
 
     fun start() = runtime.start()
-    fun send(file: File) = runtime.send(file)
+    fun send(file: File, deviceId: String?) = runtime.send(file, deviceId)
     fun confirmSas(accepted: Boolean) = runtime.confirmSas(accepted)
     suspend fun stop() = runtime.stop()
 }
