@@ -3,6 +3,7 @@ package com.fastdrop.transfer
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import okio.Source
 import okio.source
 import java.io.FileNotFoundException
@@ -16,8 +17,8 @@ class AndroidTransferFileSource(
     override val size: Long
     
     init {
-        var tempName = "unknown"
-        var tempSize = 0L
+        var tempName = uri.lastPathSegment ?: "unknown"
+        var tempSize = -1L
         
         context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
@@ -27,14 +28,36 @@ class AndroidTransferFileSource(
                 if (nameIndex != -1) {
                     tempName = cursor.getString(nameIndex) ?: "unknown"
                 }
-                if (sizeIndex != -1) {
+                if (sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
                     tempSize = cursor.getLong(sizeIndex)
                 }
             }
         }
+
+        if (tempSize < 0) {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+                if (descriptor.length >= 0) {
+                    tempSize = descriptor.length
+                }
+            }
+        }
+
+        if (tempSize < 0) {
+            tempSize = context.contentResolver.openInputStream(uri)?.use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var total = 0L
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    total += read
+                }
+                total
+            } ?: throw FileNotFoundException("Could not determine size for URI: $uri")
+        }
         
         name = tempName
         size = tempSize
+        Log.d("FastDrop", "AndroidTransferFileSource: uri=$uri, name=$name, size=$size")
     }
 
     override suspend fun openSource(): Source {

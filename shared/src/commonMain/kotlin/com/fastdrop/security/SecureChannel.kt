@@ -34,6 +34,15 @@ class SecureChannel(
 ) : Connection {
     override val peer: Peer get() = rawConnection.peer
 
+    private fun log(message: String) {
+        println("[FastDrop][SecureChannel][${peer.id}] $message")
+    }
+
+    private fun logException(operation: String, exception: Throwable) {
+        log("$operation EXCEPTION ${exception::class.simpleName}: ${exception.message}")
+        println(exception.stackTraceToString())
+    }
+
     var state: SecureChannelState = SecureChannelState.NEW
         private set
 
@@ -68,6 +77,7 @@ class SecureChannel(
 
     suspend fun handshake(): PeerVerification {
         state = SecureChannelState.HANDSHAKING
+        log("handshake started")
         try {
             val myIdentity = identityStore.getOrGenerateIdentity()
             val myName = deviceInfoProvider.getDeviceName().encodeToByteArray()
@@ -171,13 +181,16 @@ class SecureChannel(
             if (knownPeer != null && knownPeer.publicKey.contentEquals(peerIdPubKeyBytes)) {
                 state = SecureChannelState.ESTABLISHED
                 trustedPeerStore.savePeer(knownPeer.copy(lastSeen = com.fastdrop.utils.getCurrentTimeMillis()))
+                log("handshake established trusted peer; readNonce=$readNonceCounter, writeNonce=$writeNonceCounter")
                 return PeerVerification.TrustedPeer(peerDeviceId, peerNameStr, peerIdPubKeyBytes)
             }
             
             state = SecureChannelState.WAITING_FOR_SAS_CONFIRMATION
+            log("handshake waiting for SAS confirmation; readNonce=$readNonceCounter, writeNonce=$writeNonceCounter")
             return PeerVerification.NewPeer(peerDeviceId, peerNameStr, peerDeviceId, sasString, peerIdPubKeyBytes)
             
         } catch (e: Exception) {
+            logException("handshake", e)
             state = SecureChannelState.FAILED
             rawConnection.close()
             throw e
@@ -195,12 +208,14 @@ class SecureChannel(
             )
             trustedPeerStore.savePeer(peer)
             state = SecureChannelState.ESTABLISHED
+            log("SAS confirmed; readNonce=$readNonceCounter, writeNonce=$writeNonceCounter")
         }
     }
     
     suspend fun confirmPeer() {
         if (state == SecureChannelState.WAITING_FOR_SAS_CONFIRMATION) {
             state = SecureChannelState.ESTABLISHED
+            log("SAS confirmed without persistence; readNonce=$readNonceCounter, writeNonce=$writeNonceCounter")
         }
     }
 
@@ -224,6 +239,7 @@ class SecureChannel(
             val toCopy = min(available, buffer.size)
             internalReadBuffer.copyInto(buffer, 0, internalReadOffset, internalReadOffset + toCopy)
             internalReadOffset += toCopy
+            log("read buffered plaintextBytes=$toCopy, remaining=${internalReadBuffer.size - internalReadOffset}")
             return toCopy
         }
 
@@ -240,16 +256,19 @@ class SecureChannel(
             readExactlyFromRaw(encryptedBuffer, encryptedLen)
             
             if (readNonceCounter == Long.MAX_VALUE) throw IllegalStateException("Nonce overflow")
-            val nonce = buildNonce(readNonceCounter++)
+            val nonceCounter = readNonceCounter++
+            val nonce = buildNonce(nonceCounter)
             
             internalReadBuffer = readKey!!.cipher().decryptWithIv(nonce, encryptedBuffer, lenBytes)
             internalReadOffset = 0
+            log("read encrypted frame nonce=$nonceCounter, encryptedBytes=$encryptedLen, plaintextBytes=${internalReadBuffer.size}")
 
             val toCopy = min(internalReadBuffer.size, buffer.size)
             internalReadBuffer.copyInto(buffer, 0, 0, toCopy)
             internalReadOffset = toCopy
             return toCopy
         } catch (e: Exception) {
+            logException("read", e)
             state = SecureChannelState.FAILED
             rawConnection.close()
             throw e
@@ -262,7 +281,8 @@ class SecureChannel(
         
         try {
             if (writeNonceCounter == Long.MAX_VALUE) throw IllegalStateException("Nonce overflow")
-            val nonce = buildNonce(writeNonceCounter++)
+            val nonceCounter = writeNonceCounter++
+            val nonce = buildNonce(nonceCounter)
             
             val plaintext = data.copyOfRange(offset, offset + length)
             val cipher = writeKey!!.cipher()
@@ -278,7 +298,9 @@ class SecureChannel(
             ciphertext.copyInto(outBuf, 4)
             
             rawConnection.write(outBuf, 0, outBuf.size)
+            log("wrote encrypted frame nonce=$nonceCounter, plaintextBytes=$length, encryptedBytes=${ciphertext.size}")
         } catch (e: Exception) {
+            logException("write", e)
             state = SecureChannelState.FAILED
             rawConnection.close()
             throw e
@@ -286,6 +308,7 @@ class SecureChannel(
     }
 
     override suspend fun close() {
+        log("closing channel; readNonce=$readNonceCounter, writeNonce=$writeNonceCounter")
         state = SecureChannelState.CLOSED
         rawConnection.close()
     }

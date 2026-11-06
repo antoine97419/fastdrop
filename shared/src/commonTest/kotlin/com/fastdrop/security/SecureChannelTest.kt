@@ -42,7 +42,7 @@ class SecureChannelTest {
         assertEquals(SecureChannelState.ESTABLISHED, sec2.state)
     }
 
-    // @Test // Temporarily disabled due to whyoleg cryptography-kotlin JDK ChaCha20 bug on re-initialization
+    @Test
     fun testEncryptionDecryption() = runTest {
         val (peer1, peer2) = createPeers()
         val (conn1, conn2) = createInMemoryConnectionPair(peer1, peer2)
@@ -60,26 +60,21 @@ class SecureChannelTest {
         sec2.confirmPeer(res2)
         job.await()
 
-        val dispatcher1 = kotlinx.coroutines.newSingleThreadContext("Peer1")
-        val dispatcher2 = kotlinx.coroutines.newSingleThreadContext("Peer2")
-
         val data = "hello FastDrop".encodeToByteArray()
-        
-        async(dispatcher1) {
+
+        val writeJob = async(Dispatchers.Default) {
             sec1.write(data, 0, data.size)
         }
-        
+
         val readBuffer = ByteArray(1024)
-        val readLen = kotlinx.coroutines.withContext(dispatcher2) {
-            sec2.read(readBuffer)
-        }
-        
+        val readLen = sec2.read(readBuffer)
+        writeJob.await()
+
         val readData = readBuffer.copyOfRange(0, readLen)
-        assertTrue(data.contentEquals(readData))
         assertTrue(data.contentEquals(readData))
     }
 
-    // @Test // Temporarily disabled due to whyoleg cryptography-kotlin JDK ChaCha20 bug on re-initialization
+    @Test
     fun testCorruption() = runTest {
         val (peer1, peer2) = createPeers()
         val stream1 = com.fastdrop.InMemoryStream()
