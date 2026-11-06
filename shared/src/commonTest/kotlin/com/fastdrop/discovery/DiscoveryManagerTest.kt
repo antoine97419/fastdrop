@@ -80,4 +80,15 @@ class DiscoveryManagerTest {
         assertEquals("Windows PC", peers.first { it.discoveryId == "pc" }.displayName)
         assertEquals(true, peers.first { it.discoveryId == "pc" }.isFastDropService)
     }
+
+    @Test fun deduplicatesPublicIdentityAcrossProviders() = runTest {
+        val first = TestDiscoveryProvider()
+        val second = TestDiscoveryProvider()
+        val id = "AB:".repeat(31) + "AB"
+        first.updatePeers(listOf(DiscoveredPeer("lan", "Pixel", listOf("192.168.1.2"),
+            47832, DiscoveryType.MDNS, isFastDropService = true, deviceId = id)))
+        second.updatePeers(listOf(DiscoveredPeer("other", "Pixel", listOf("10.0.0.2"),
+            47832, DiscoveryType.MDNS, isFastDropService = true, deviceId = id)))
+        assertEquals(1, DiscoveryManager(listOf(first, second)).peers.first { it.isNotEmpty() }.size)
+    }
 }

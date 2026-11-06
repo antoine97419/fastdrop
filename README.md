@@ -1,5 +1,17 @@
 # FastDrop
 
+## Application Windows
+
+Lancer la fenêtre avec `./gradlew.bat :desktopApp:run` sous PowerShell. Le CLI de diagnostic reste accessible avec `./gradlew.bat :shared:runFastDropDesktop --args="--dev"`.
+
+À l'ouverture, le runtime charge l'identité persistante, publie et parcourt `_fastdrop._tcp.local.`, démarre le bridge Wi-Fi Direct puis le listener TCP. À la fermeture, il ferme la session, le listener, la discovery et le bridge. Les fichiers reçus vont dans `Downloads/FastDrop`.
+
+Le TXT mDNS contient `version=1`, `deviceId` (SHA-256 public de la clé Ed25519, format hexadécimal séparé par `:`), `name` et `capabilities=receive,send`. Le port est celui du service DNS-SD. L'identité mDNS sert à la présentation et à retrouver un peer connu ; SecureChannel vérifie toujours la clé pendant la connexion.
+
+Sur le même LAN, Android affiche uniquement les services FastDrop résolus par NSD. Un SSID Wi-Fi Direct seul ne devient pas une carte FastDrop. La découverte hors LAN commun et le choix automatique du transport restent à faire.
+
+L'envoi Windows vers Android utilise encore le workflow Legacy GO validé : sélectionner un fichier sur Windows, puis lancer `Receive files` sur Android. Selon l'ordre des actions, la session peut attendre le second appareil. La négociation automatique des rôles après SecureChannel est prévue séparément. L'envoi Android vers Windows utilise l'adresse LAN découverte et le listener Desktop permanent.
+
 FastDrop est un projet étudiant (SAE BUT Réseaux & Télécommunications) visant à créer une application de transfert de fichiers peer-to-peer (P2P) multiplateforme.
 L'objectif est d'offrir une expérience similaire à AirDrop, fonctionnant entre Android et Windows, même en l'absence totale d'infrastructure réseau (pas de routeur, pas de connexion Internet).
 

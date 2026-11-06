@@ -13,6 +13,7 @@ gradle-8.6-bin.zip
 build/
 androidApp/build/
 shared/build/
+desktopApp/build/
 shared/bridge/windows/bin/
 shared/bridge/windows/obj/
 /.android-home/

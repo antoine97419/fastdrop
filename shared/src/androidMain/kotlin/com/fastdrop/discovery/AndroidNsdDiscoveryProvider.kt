@@ -10,7 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 
 class AndroidNsdDiscoveryProvider(
     context: Context,
-    private val localFriendlyName: String
+    private val localFriendlyName: String,
+    private val localDeviceId: String? = null
 ) : DiscoveryProvider {
 
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
@@ -58,11 +59,12 @@ class AndroidNsdDiscoveryProvider(
     }
 
     private fun registerService() {
+        val record = FastDropServiceRecord(1, localDeviceId, localFriendlyName, setOf("send", "receive"))
         val serviceInfo = NsdServiceInfo().apply {
             serviceName = localFriendlyName
             serviceType = SERVICE_TYPE
             port = FastDropConfig.DEFAULT_PORT
-            setAttribute("version", "1")
+            record.txt().forEach { (key, value) -> setAttribute(key, value) }
         }
 
         registrationListener = object : NsdManager.RegistrationListener {
@@ -95,19 +97,21 @@ class AndroidNsdDiscoveryProvider(
                     }
 
                     override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                        val versionBytes = serviceInfo.attributes["version"]
-                        val version = versionBytes?.let { String(it) }
-                        
-                        if (version != "1") return
+                        val txt = listOf("version", "deviceId", "name", "capabilities")
+                            .associateWith { key -> serviceInfo.attributes[key]?.toString(Charsets.UTF_8) ?: "" }
+                        val record = FastDropServiceRecord.parse(txt, serviceInfo.serviceName) ?: return
 
                         val address = serviceInfo.host?.hostAddress ?: return
                         val peer = DiscoveredPeer(
                             discoveryId = serviceInfo.serviceName,
-                            displayName = serviceInfo.serviceName,
+                            displayName = record.name,
                             addresses = listOf(address),
                             port = serviceInfo.port,
                             source = DiscoveryType.MDNS,
-                            isFastDropService = true
+                            protocolVersion = record.version,
+                            isFastDropService = true,
+                            deviceId = record.deviceId,
+                            capabilities = record.capabilities
                         )
                         
                         synchronized(currentDiscovered) {

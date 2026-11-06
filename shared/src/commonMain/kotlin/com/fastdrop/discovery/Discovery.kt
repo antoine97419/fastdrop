@@ -17,7 +17,9 @@ data class DiscoveredPeer(
     val port: Int,
     val source: DiscoveryType,
     val protocolVersion: Int = 1,
-    val isFastDropService: Boolean = false
+    val isFastDropService: Boolean = false,
+    val deviceId: String? = null,
+    val capabilities: Set<String> = emptySet()
 )
 
 interface DiscoveryProvider {
@@ -37,7 +39,7 @@ class DiscoveryManager(
                 provider.peers.collect { list ->
                     latest[index] = list
                     send(latest.flatMap { it }
-                        .groupBy { it.discoveryId }
+                        .groupBy { it.deviceId ?: it.discoveryId }
                         .values.map { matches ->
                             matches.firstOrNull { it.isFastDropService } ?: matches.first()
                         })

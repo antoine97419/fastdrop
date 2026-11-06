@@ -31,6 +31,7 @@ import com.fastdrop.transfer.ControlMessage
 import com.fastdrop.transport.Connection
 import com.fastdrop.transport.GenericLanTransport
 import dev.whyoleg.cryptography.CryptographyProvider
+import dev.whyoleg.cryptography.algorithms.EdDSA
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -127,7 +128,11 @@ class MainActivity : ComponentActivity() {
         val hasWifiDirect = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
         
         val discoveryProviders = mutableListOf<com.fastdrop.discovery.DiscoveryProvider>()
-        val mDNS = AndroidNsdDiscoveryProvider(this, deviceName)
+        val localDeviceId = kotlinx.coroutines.runBlocking {
+            calculateFingerprint(identityStore.getOrGenerateIdentity().keyPair.publicKey
+                .encodeToByteArray(EdDSA.PublicKey.Format.RAW))
+        }
+        val mDNS = AndroidNsdDiscoveryProvider(this, deviceName, localDeviceId)
         discoveryProviders.add(mDNS)
 
         if (hasWifiDirect) {
@@ -222,9 +227,16 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             discoveryManager.startAll()
             discoveryManager.peers.collect { list ->
+                val trustedNames = list.filter { it.isFastDropService && it.deviceId != null }
+                    .filter { peerStore.getPeer(it.deviceId!!) != null }
+                    .mapNotNull { it.displayName }
                 withContext(Dispatchers.Main) {
                     discoveredPeers.clear()
                     discoveredPeers.addAll(list)
+                    trustedNames.forEach { name ->
+                        val clean = FastDropUiPresentation.cleanName(name)
+                        if (clean !in trustedDeviceNames) trustedDeviceNames.add(clean)
+                    }
                 }
             }
         }
@@ -305,7 +317,9 @@ class MainActivity : ComponentActivity() {
                     TransportType.LAN
                 }
                 val peer = Peer(discoveredPeer.discoveryId, discoveredPeer.displayName ?: "Target", transportType, targetIp)
-                val rawConn = transport.connect(peer)
+                val rawConn = if (discoveredPeer.source == com.fastdrop.discovery.DiscoveryType.MDNS) {
+                    com.fastdrop.transport.ManualLanTransport(discoveredPeer.port).connect(peer)
+                } else transport.connect(peer)
 
                 withContext(Dispatchers.Main) { appState.value = "Authenticating..." }
                 val secureChannel = SecureChannel(rawConn, identityStore, peerStore, deviceInfoProvider, cryptoProvider)
