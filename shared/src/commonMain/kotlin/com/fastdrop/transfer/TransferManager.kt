@@ -4,6 +4,7 @@ import com.fastdrop.transport.Connection
 import com.fastdrop.transport.readExactly
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -308,9 +309,12 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
             val hash = hashingSink.hash.hex()
             log("RECEIVE", "hash local=$hash, remote=${complete.hash}, totalReceived=$receivedBytes/${offer.size}")
             if (receivedBytes == offer.size && hash.equals(complete.hash, ignoreCase = true)) {
+                hashingSink.close()
+                hashingSink = null
+                destination.commit()
+                fileValid = true
                 log("RECEIVE", "sending SUCCESS")
                 sendControlMessage(connection, ControlMessage.Success(offer.id))
-                fileValid = true
                 true
             } else {
                 log("RECEIVE", "sending HASH_MISMATCH")
@@ -333,15 +337,9 @@ class TransferManager(private val chunkSize: Int = 1024 * 1024) {
             } catch (closeError: Exception) {
                 logException("RECEIVE", closeError)
             }
-            if (fileValid) {
+            if (!fileValid) {
                 try {
-                    activeDestination?.commit()
-                } catch (commitError: Exception) {
-                    logException("RECEIVE", commitError)
-                }
-            } else {
-                try {
-                    activeDestination?.abort()
+                    withContext(NonCancellable) { activeDestination?.abort() }
                 } catch (abortError: Exception) {
                     logException("RECEIVE", abortError)
                 }

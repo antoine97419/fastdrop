@@ -25,12 +25,14 @@ import com.fastdrop.security.*
 import com.fastdrop.transfer.AndroidIncomingFileDestination
 import com.fastdrop.transfer.AndroidTransferFileSource
 import com.fastdrop.transfer.TransferManager
+import com.fastdrop.transfer.ControlMessage
 import com.fastdrop.transport.Connection
 import com.fastdrop.transport.GenericLanTransport
 import dev.whyoleg.cryptography.CryptographyProvider
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -55,6 +57,9 @@ class MainActivity : ComponentActivity() {
     private var pendingVerification: PeerVerification.NewPeer? = null
     private var pendingSecureChannel: SecureChannel? = null
     private var pendingLegacySasDecision: CompletableDeferred<Boolean>? = null
+    private var pendingOfferDecision: CompletableDeferred<Boolean>? = null
+    private val incomingOfferState = mutableStateOf<ControlMessage.FileOffer?>(null)
+    private val incomingPeerNameState = mutableStateOf<String?>(null)
     private var legacyPickerPending = false
     private var legacyTransferInProgress = false
     private lateinit var legacySendWorkflow: PickerFirstLegacySendWorkflow<Uri, Connection, SecureChannel>
@@ -100,6 +105,9 @@ class MainActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             permissionsToRequest.add(android.Manifest.permission.NEARBY_WIFI_DEVICES)
         }
+        if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
+            permissionsToRequest.add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
         requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         
         cryptoProvider = CryptographyProvider.Default
@@ -143,6 +151,8 @@ class MainActivity : ComponentActivity() {
                         state = appState.value,
                         progress = progressState.value,
                         sasCode = sasCodeState.value,
+                        incomingOffer = incomingOfferState.value,
+                        incomingPeerName = incomingPeerNameState.value,
                         onSendClick = { peer -> 
                             appState.value = PickerFirstLegacySendWorkflow.SELECTING_FILE
                             selectedPeerForTransfer = peer
@@ -173,6 +183,9 @@ class MainActivity : ComponentActivity() {
                                 pendingVerification = null
                             }
                         },
+                        onAcceptOffer = { pendingOfferDecision?.complete(true) },
+                        onRejectOffer = { pendingOfferDecision?.complete(false) },
+                        onReceiveFromWindows = { startLegacyGoReceive() },
                         onLegacyGoClick = {
                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                                 startLegacyGoFileSelection()
@@ -377,6 +390,12 @@ class MainActivity : ComponentActivity() {
         )
 
         val verification = secureChannel.handshake()
+        withContext(Dispatchers.Main) {
+            incomingPeerNameState.value = when (verification) {
+                is PeerVerification.NewPeer -> verification.friendlyName
+                is PeerVerification.TrustedPeer -> verification.friendlyName
+            }
+        }
         if (verification is PeerVerification.NewPeer) {
             val decision = CompletableDeferred<Boolean>()
             withContext(Dispatchers.Main) {
@@ -387,7 +406,7 @@ class MainActivity : ComponentActivity() {
             val accepted = try {
                 decision.await()
             } finally {
-                withContext(Dispatchers.Main) {
+                withContext(NonCancellable + Dispatchers.Main) {
                     pendingLegacySasDecision = null
                     sasCodeState.value = null
                 }
@@ -402,8 +421,87 @@ class MainActivity : ComponentActivity() {
         return secureChannel
     }
 
+    private fun startLegacyGoReceive() {
+        if (legacyPickerPending || legacyTransferInProgress) return
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+            appState.value = "Legacy GO requires Android 10+"
+            return
+        }
+        legacyTransferInProgress = true
+        lifecycleScope.launch(Dispatchers.IO) {
+            var receivedDestination: AndroidIncomingFileDestination? = null
+            var rejected = false
+            val workflow = LegacyGoReceiveWorkflow<Connection, SecureChannel>(
+                connect = { com.fastdrop.transport.AndroidLegacyGoConnector(this@MainActivity).connect() },
+                authenticate = { raw -> authenticateLegacyConnection(raw) },
+                receive = { secure ->
+                    transferManager.receiveFile(
+                        connection = secure,
+                        onOfferReceived = { offer ->
+                            val decision = CompletableDeferred<Boolean>()
+                            withContext(Dispatchers.Main) {
+                                pendingOfferDecision = decision
+                                incomingOfferState.value = offer
+                            }
+                            val accepted = try {
+                                decision.await()
+                            } finally {
+                                withContext(NonCancellable + Dispatchers.Main) {
+                                    pendingOfferDecision = null
+                                    incomingOfferState.value = null
+                                }
+                            }
+                            if (!accepted) {
+                                rejected = true
+                                null
+                            } else {
+                                AndroidIncomingFileDestination(
+                                    this@MainActivity,
+                                    transferManager.sanitizeFilename(offer.name)
+                                ).also { receivedDestination = it }
+                            }
+                        },
+                        onProgress = { current, total ->
+                            lifecycleScope.launch(Dispatchers.Main) {
+                                val percent = if (total > 0) current.toFloat() / total else 1f
+                                progressState.value = percent
+                                appState.value = "Receiving " + (receivedDestination?.displayPath?.substringAfterLast('/') ?: "file") +
+                                    " — " + (percent * 100).toInt() + "%"
+                            }
+                        }
+                    )
+                },
+                closeSecure = { it.close() },
+                closeRaw = { it.close() },
+                updateState = { state -> withContext(Dispatchers.Main) { appState.value = state } },
+                reportCloseError = { Log.w("FastDrop", "Failed to close receive session", it) }
+            )
+            try {
+                val success = workflow.run()
+                withContext(Dispatchers.Main) {
+                    appState.value = when {
+                        success -> "Received successfully! " + (receivedDestination?.displayPath ?: "")
+                        rejected -> "File rejected."
+                        appState.value.startsWith("Error:") -> appState.value
+                        else -> "Receive failed."
+                    }
+                }
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    pendingOfferDecision?.complete(false)
+                    pendingOfferDecision = null
+                    incomingOfferState.value = null
+                    incomingPeerNameState.value = null
+                    progressState.value = 0f
+                    legacyTransferInProgress = false
+                }
+            }
+        }
+    }
+
     override fun onDestroy() {
         pendingLegacySasDecision?.complete(false)
+        pendingOfferDecision?.complete(false)
         super.onDestroy()
         lifecycleScope.launch(Dispatchers.IO) {
             discoveryManager.stopAll()
@@ -418,6 +516,11 @@ fun FastDropApp(
     state: String,
     progress: Float,
     sasCode: String?,
+    incomingOffer: ControlMessage.FileOffer?,
+    incomingPeerName: String?,
+    onAcceptOffer: () -> Unit,
+    onRejectOffer: () -> Unit,
+    onReceiveFromWindows: () -> Unit,
     onSendClick: (com.fastdrop.discovery.DiscoveredPeer) -> Unit,
     onAcceptSas: () -> Unit,
     onRejectSas: () -> Unit,
@@ -430,6 +533,10 @@ fun FastDropApp(
             Text("Spike: Connect to Windows Legacy GO")
         }
         
+        Button(onClick = onReceiveFromWindows, modifier = Modifier.fillMaxWidth()) {
+            Text("Receive from Windows")
+        }
+
         Spacer(Modifier.height(16.dp))
         
         Text("Nearby devices", style = MaterialTheme.typography.titleMedium)
@@ -448,6 +555,16 @@ fun FastDropApp(
             }
         }
         
+        if (incomingOffer != null) {
+            AlertDialog(
+                onDismissRequest = onRejectOffer,
+                title = { Text("Incoming file from " + (incomingPeerName ?: "Windows")) },
+                text = { Text(incomingOffer.name + " • " + android.text.format.Formatter.formatShortFileSize(androidx.compose.ui.platform.LocalContext.current, incomingOffer.size)) },
+                confirmButton = { TextButton(onClick = onAcceptOffer) { Text("Accept") } },
+                dismissButton = { TextButton(onClick = onRejectOffer) { Text("Reject") } }
+            )
+        }
+
         if (sasCode != null) {
             Card(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {

@@ -98,15 +98,63 @@ class TransferManagerTest {
         val (peer1, peer2) = createPeers()
         val (rawSender, receiver) = createInMemoryConnectionPair(peer1, peer2)
         val sender = CorruptingChunkConnection(rawSender)
+        var aborted = false
+        var committed = false
+        val destination = object : IncomingFileDestination {
+            override suspend fun openSink(): Sink = Buffer()
+            override suspend fun commit() { committed = true }
+            override suspend fun abort() { aborted = true }
+        }
 
         val sendJob = async(Dispatchers.Default) { manager.sendFile(sender, bufferSource("hash.txt", data)) }
         val receiveJob = async(Dispatchers.Default) {
-            manager.receiveFile(receiver, { bufferDestination(Buffer()) })
+            manager.receiveFile(receiver, { destination })
         }
 
         assertFalse(sendJob.await(), "Sender should receive HASH_MISMATCH")
         assertFalse(receiveJob.await(), "Receiver should reject the corrupted hash")
         assertTrue(sender.corrupted)
+        assertTrue(aborted)
+        assertFalse(committed)
+    }
+
+    @Test
+    fun testOfferRejectedBeforeChunks() = runTest {
+        val manager = TransferManager(chunkSize = 4)
+        val (peer1, peer2) = createPeers()
+        val (sender, receiver) = createInMemoryConnectionPair(peer1, peer2)
+        val sendJob = async(Dispatchers.Default) {
+            manager.sendFile(sender, bufferSource("rejected.txt", "secret".encodeToByteArray()))
+        }
+        val receiveJob = async(Dispatchers.Default) {
+            manager.receiveFile(receiver, { null })
+        }
+        assertFalse(sendJob.await())
+        assertFalse(receiveJob.await())
+    }
+
+    @Test
+    fun interruptedTransferAbortsPartialDestination() = runTest {
+        val manager = TransferManager(chunkSize = 4)
+        val (peer1, peer2) = createPeers()
+        val (sender, receiver) = createInMemoryConnectionPair(peer1, peer2)
+        var aborted = false
+        var committed = false
+        val destination = object : IncomingFileDestination {
+            override suspend fun openSink(): Sink = Buffer()
+            override suspend fun commit() { committed = true }
+            override suspend fun abort() { aborted = true }
+        }
+        val receiveJob = async(Dispatchers.Default) {
+            manager.receiveFile(receiver, { destination })
+        }
+        sender.write(controlFrame(ControlMessage.FileOffer("cut", "partial.bin", 10)))
+        assertIs<ControlMessage.FileAccept>(readControlMessage(sender))
+        sender.close()
+
+        assertFalse(kotlinx.coroutines.withContext(Dispatchers.Default) { withTimeout(5_000) { receiveJob.await() } })
+        assertTrue(aborted)
+        assertFalse(committed)
     }
 
     @Test

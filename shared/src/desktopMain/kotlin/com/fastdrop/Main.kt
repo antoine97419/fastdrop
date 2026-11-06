@@ -24,6 +24,7 @@ fun main(): Unit = runBlocking {
     println("FastDrop TCP Demo")
     println("1. Listen (Receiver)")
     println("2. Connect (Sender)")
+    println("3. Send to Android (Legacy GO)")
     print("Choice: ")
 
     val scanner = Scanner(System.`in`)
@@ -38,7 +39,16 @@ fun main(): Unit = runBlocking {
     val discoveryManager = DiscoveryManager(listOf(DesktopMdnsDiscoveryProvider(deviceInfoProvider.getDeviceName())))
 
     when (choice) {
-        "1" -> {
+        "1", "3" -> {
+            val outgoingFile = if (choice == "3") {
+                print("File path to send: ")
+                File(scanner.nextLine().trim()).also {
+                    if (!it.isFile) {
+                        println("File does not exist or is not a regular file.")
+                        return@runBlocking
+                    }
+                }
+            } else null
             var targetFile: String? = null
 
             val receiver = PersistentReceiverServer(
@@ -73,28 +83,41 @@ fun main(): Unit = runBlocking {
                     }
                 },
                 receiveTransfer = { secureChannel ->
-                    targetFile = null
-                    val success = transferManager.receiveFile(
-                        connection = secureChannel,
-                        onOfferReceived = { offer ->
-                            println("Incoming file: ${offer.name} (${offer.size / 1024 / 1024} MB)")
-                            val safeName = transferManager.sanitizeFilename(offer.name)
-                            targetFile = safeName
-                            DesktopIncomingFileDestination(File(safeName))
-                        },
-                        onProgress = { current, total ->
-                            val percent = if (total > 0) (current.toDouble() / total * 100).roundToInt() else 0
-                            print("\rReceiving: $current / $total ($percent %)")
-                        }
-                    )
-                    println()
-                    if (success) println("File saved to $targetFile")
-                    success
+                    if (outgoingFile != null) {
+                        val success = transferManager.sendFile(
+                            connection = secureChannel,
+                            fileSource = DesktopTransferFileSource(outgoingFile),
+                            onProgress = { current, total ->
+                                val percent = if (total > 0) (current.toDouble() / total * 100).roundToInt() else 100
+                                print("\rSending: $current / $total ($percent %)")
+                            }
+                        )
+                        println()
+                        success
+                    } else {
+                        targetFile = null
+                        val success = transferManager.receiveFile(
+                            connection = secureChannel,
+                            onOfferReceived = { offer ->
+                                println("Incoming file: ${offer.name} (${offer.size / 1024 / 1024} MB)")
+                                val safeName = transferManager.sanitizeFilename(offer.name)
+                                targetFile = safeName
+                                DesktopIncomingFileDestination(File(safeName))
+                            },
+                            onProgress = { current, total ->
+                                val percent = if (total > 0) (current.toDouble() / total * 100).roundToInt() else 0
+                                print("\rReceiving: $current / $total ($percent %)")
+                            }
+                        )
+                        println()
+                        if (success) println("File saved to $targetFile")
+                        success
+                    }
                 },
                 closeSecureChannel = { it.close() },
                 closeRawConnection = { it.close() },
                 stopHosting = { transport.stop() },
-                onListening = { println("Listening for connections...") },
+                onListening = { println(if (outgoingFile != null) "Waiting for Android receiver..." else "Listening for connections...") },
                 onSessionMessage = { println(it) },
                 onCloseError = { println("Failed to close client session: ${it.message}") }
             )

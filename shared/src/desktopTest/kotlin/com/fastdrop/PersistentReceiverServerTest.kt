@@ -16,6 +16,21 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class PersistentReceiverServerTest {
     @Test
+    fun senderRoleWaitsForAndroidConnection() = runTest {
+        val fixture = ReceiverFixture()
+        val job = launch { fixture.server.run() }
+        runCurrent()
+
+        assertTrue(job.isActive)
+        assertTrue(fixture.receivedIds.isEmpty())
+        fixture.connections.send(TestRawConnection(1))
+        runCurrent()
+
+        assertEquals(listOf(1), fixture.receivedIds)
+        fixture.server.stop()
+    }
+
+    @Test
     fun successfulTransferLeavesReceiverActive() = runTest {
         val fixture = ReceiverFixture()
         val job = launch { fixture.server.run() }

@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import android.os.Build
@@ -42,9 +43,9 @@ class AndroidLegacyGoConnector(private val context: Context) {
         return suspendCancellableCoroutine { cont ->
             Log.d("FastDrop", "LegacyGoConnector: Requesting network $ssid...")
             
+            val socketRef = AtomicReference<Socket?>()
             val callback = object : ConnectivityManager.NetworkCallback() {
                 private var tcpAttempted = false
-                private var currentSocket: Socket? = null
 
                 override fun onAvailable(network: Network) {
                     super.onAvailable(network)
@@ -66,9 +67,10 @@ class AndroidLegacyGoConnector(private val context: Context) {
                     
                     Thread {
                         try {
+                            if (!cont.isActive) return@Thread
                             Log.d("FastDrop", "LegacyGoConnector: IPv4 obtained: ${ipv4.address.hostAddress}. Creating explicitly bound TCP Socket...")
                             val socket = network.socketFactory.createSocket()
-                            currentSocket = socket
+                            socketRef.set(socket)
                             
                             socket.connect(InetSocketAddress("192.168.137.1", FastDropConfig.DEFAULT_PORT), 15_000)
                             Log.d("FastDrop", "LegacyGoConnector: TCP Connected! Local Address: ${socket.localSocketAddress}")
@@ -87,10 +89,10 @@ class AndroidLegacyGoConnector(private val context: Context) {
                                 networkCallback = currentCallback
                             )
                             
-                            cont.resume(connection)
+                            if (cont.isActive) cont.resume(connection) else cleanup(connectivityManager, currentCallback, socket)
                         } catch (e: Exception) {
                             Log.e("FastDrop", "LegacyGoConnector: TCP connection failed", e)
-                            cleanup(connectivityManager, currentCallback, currentSocket)
+                            cleanup(connectivityManager, currentCallback, socketRef.get())
                             if (cont.isActive) cont.resumeWithException(e)
                         }
                     }.start()
@@ -99,7 +101,7 @@ class AndroidLegacyGoConnector(private val context: Context) {
                 override fun onUnavailable() {
                     super.onUnavailable()
                     Log.e("FastDrop", "LegacyGoConnector: onUnavailable (timeout/rejected)")
-                    cleanup(connectivityManager, this, null)
+                    cleanup(connectivityManager, this, socketRef.get())
                     if (cont.isActive) cont.resumeWithException(Exception("Network unavailable (timeout or rejected by user)"))
                 }
 
@@ -107,22 +109,28 @@ class AndroidLegacyGoConnector(private val context: Context) {
                     super.onLost(network)
                     Log.e("FastDrop", "LegacyGoConnector: onLost - network connection lost")
                     // If we lose network before connection is established:
-                    if (cont.isActive) cont.resumeWithException(Exception("Network lost during connection"))
+                    if (cont.isActive) {
+                        cleanup(connectivityManager, this, socketRef.get())
+                        cont.resumeWithException(Exception("Network lost during connection"))
+                    }
                     // If connection was already established, the Socket read/write will fail natively and trigger connection drop.
                 }
             }
             
             cont.invokeOnCancellation {
-                cleanup(connectivityManager, callback, null)
+                cleanup(connectivityManager, callback, socketRef.get())
             }
             
             try {
                 connectivityManager.requestNetwork(request, callback)
+                if (!cont.isActive) cleanup(connectivityManager, callback, socketRef.get())
             } catch (e: SecurityException) {
                 Log.e("FastDrop", "LegacyGoConnector: SecurityException", e)
+                cleanup(connectivityManager, callback, socketRef.get())
                 if (cont.isActive) cont.resumeWithException(e)
             } catch (e: Exception) {
                 Log.e("FastDrop", "LegacyGoConnector: Exception", e)
+                cleanup(connectivityManager, callback, socketRef.get())
                 if (cont.isActive) cont.resumeWithException(e)
             }
         }

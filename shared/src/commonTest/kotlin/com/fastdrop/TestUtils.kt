@@ -14,6 +14,7 @@ import okio.Buffer
 class InMemoryStream(private val maxReadSize: Int = Int.MAX_VALUE) {
     private val buffer = Buffer()
     private val mutex = Mutex()
+    @Volatile
     private var isClosed = false
 
     suspend fun write(data: ByteArray, offset: Int, length: Int) {
