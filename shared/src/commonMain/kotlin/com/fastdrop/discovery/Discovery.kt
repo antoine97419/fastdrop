@@ -30,7 +30,9 @@ interface DiscoveryProvider {
 }
 
 class DiscoveryManager(
-    private val providers: List<DiscoveryProvider>
+    private val providers: List<DiscoveryProvider>,
+    private val localDeviceId: String? = null,
+    private val onDuplicate: (String) -> Unit = {}
 ) {
     val peers: Flow<List<DiscoveredPeer>> = kotlinx.coroutines.flow.channelFlow {
         val latest = Array(providers.size) { emptyList<DiscoveredPeer>() }
@@ -38,11 +40,7 @@ class DiscoveryManager(
             launch {
                 provider.peers.collect { list ->
                     latest[index] = list
-                    send(latest.flatMap { it }
-                        .groupBy { it.deviceId ?: it.discoveryId }
-                        .values.map { matches ->
-                            matches.firstOrNull { it.isFastDropService } ?: matches.first()
-                        })
+                    send(mergeDiscoveredPeers(latest.flatMap { it }, localDeviceId, onDuplicate))
                 }
             }
         }
@@ -56,3 +54,18 @@ class DiscoveryManager(
         providers.forEach { it.stop() }
     }
 }
+
+/** A service name is only a fallback key; public device identity is the logical key. */
+fun mergeDiscoveredPeers(
+    peers: List<DiscoveredPeer>,
+    localDeviceId: String? = null,
+    onDuplicate: (String) -> Unit = {}
+): List<DiscoveredPeer> = peers
+    .filterNot { localDeviceId != null && it.deviceId == localDeviceId }
+    .groupBy { it.deviceId ?: it.discoveryId }
+    .map { (key, matches) ->
+        if (matches.size > 1) onDuplicate(key)
+        val preferred = matches.lastOrNull { it.isFastDropService } ?: matches.last()
+        preferred.copy(addresses = (preferred.addresses + matches.flatMap { it.addresses }).distinct(),
+            capabilities = matches.flatMap { it.capabilities }.toSet())
+    }

@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var cryptoProvider: CryptographyProvider
 
     private var serverJob: Job? = null
+    private var discoveryJob: Job? = null
     
     // UI States
     private val discoveredPeers = mutableStateListOf<com.fastdrop.discovery.DiscoveredPeer>()
@@ -132,7 +133,7 @@ class MainActivity : ComponentActivity() {
             calculateFingerprint(identityStore.getOrGenerateIdentity().keyPair.publicKey
                 .encodeToByteArray(EdDSA.PublicKey.Format.RAW))
         }
-        val mDNS = AndroidNsdDiscoveryProvider(this, deviceName, localDeviceId)
+        val mDNS = AndroidNsdDiscoveryProvider.getShared(this, deviceName, localDeviceId)
         discoveryProviders.add(mDNS)
 
         if (hasWifiDirect) {
@@ -150,7 +151,9 @@ class MainActivity : ComponentActivity() {
         }
 
         // Combine discovery
-        discoveryManager = DiscoveryManager(discoveryProviders)
+        discoveryManager = DiscoveryManager(discoveryProviders, localDeviceId) { id ->
+            Log.d("FastDrop", "[Discovery] merged duplicate peer deviceId=$id")
+        }
         transferManager = TransferManager()
         legacySendWorkflow = createLegacySendWorkflow()
         
@@ -224,12 +227,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startDiscovery() {
-        lifecycleScope.launch(Dispatchers.IO) {
+        discoveryJob = lifecycleScope.launch(Dispatchers.Main.immediate) {
             discoveryManager.startAll()
             discoveryManager.peers.collect { list ->
-                val trustedNames = list.filter { it.isFastDropService && it.deviceId != null }
-                    .filter { peerStore.getPeer(it.deviceId!!) != null }
-                    .mapNotNull { it.displayName }
+                val trustedNames = withContext(Dispatchers.IO) {
+                    list.filter { it.isFastDropService && it.deviceId != null }
+                        .filter { peerStore.getPeer(it.deviceId!!) != null }
+                        .mapNotNull { it.displayName }
+                }
                 withContext(Dispatchers.Main) {
                     discoveredPeers.clear()
                     discoveredPeers.addAll(list)
@@ -560,10 +565,11 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         pendingLegacySasDecision?.complete(false)
         pendingOfferDecision?.complete(false)
-        super.onDestroy()
-        lifecycleScope.launch(Dispatchers.IO) {
+        discoveryJob?.cancel()
+        kotlinx.coroutines.runBlocking {
             discoveryManager.stopAll()
             transport.stop()
         }
+        super.onDestroy()
     }
 }

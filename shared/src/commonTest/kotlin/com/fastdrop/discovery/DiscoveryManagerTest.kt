@@ -91,4 +91,33 @@ class DiscoveryManagerTest {
             47832, DiscoveryType.MDNS, isFastDropService = true, deviceId = id)))
         assertEquals(1, DiscoveryManager(listOf(first, second)).peers.first { it.isNotEmpty() }.size)
     }
+
+    @Test fun filtersSelfByIdButKeepsAnotherDeviceWithSameName() {
+        val local = "AA:".repeat(31) + "AA"
+        val other = "BB:".repeat(31) + "BB"
+        val peers = listOf(
+            DiscoveredPeer("self-suffixed", "Google Pixel 7a (2)", listOf("192.168.1.2"),
+                47832, DiscoveryType.MDNS, isFastDropService = true, deviceId = local),
+            DiscoveredPeer("other", "Google Pixel 7a", listOf("192.168.1.3"),
+                47832, DiscoveryType.MDNS, isFastDropService = true, deviceId = other)
+        )
+        assertEquals(listOf(other), mergeDiscoveredPeers(peers, local).map { it.deviceId })
+    }
+
+    @Test fun mergesDuplicateIdsButNotMatchingNames() {
+        val first = "AA:".repeat(31) + "AA"
+        val second = "BB:".repeat(31) + "BB"
+        val peers = listOf(
+            DiscoveredPeer("service-1", "Pixel", listOf("192.168.1.2"), 47832,
+                DiscoveryType.MDNS, isFastDropService = true, deviceId = first),
+            DiscoveredPeer("service-2", "Pixel (2)", listOf("192.168.1.4"), 47832,
+                DiscoveryType.MDNS, isFastDropService = true, deviceId = first),
+            DiscoveredPeer("service-3", "Pixel", listOf("192.168.1.5"), 47832,
+                DiscoveryType.MDNS, isFastDropService = true, deviceId = second)
+        )
+        val merged = mergeDiscoveredPeers(peers)
+        assertEquals(2, merged.size)
+        assertEquals(setOf("192.168.1.2", "192.168.1.4"),
+            merged.first { it.deviceId == first }.addresses.toSet())
+    }
 }
