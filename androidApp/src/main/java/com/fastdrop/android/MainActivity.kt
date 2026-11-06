@@ -52,6 +52,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var lanRuntime: AndroidFastDropRuntime
 
     private var serverJob: Job? = null
+    private var runtimeStarted = false
+    private var lastSessionWasReceiving = false
     
     // UI States
     private val discoveredPeers = mutableStateListOf<com.fastdrop.discovery.DiscoveredPeer>()
@@ -93,7 +95,11 @@ class MainActivity : ComponentActivity() {
                     selectedPeer.sessionVersion == com.fastdrop.session.SessionProtocol.VERSION)
                     lanRuntime.send(uri, selectedPeer)
                 else sendFile(uri, selectedPeer)
-            }
+            } else appState.value = "Ready"
+            selectedPeerForTransfer = null
+        } else {
+            selectedPeerForTransfer = null
+            appState.value = "Ready"
         }
     }
     private var selectedPeerForTransfer: com.fastdrop.discovery.DiscoveredPeer? = null
@@ -120,7 +126,11 @@ class MainActivity : ComponentActivity() {
         if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
             permissionsToRequest.add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
-        requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+        val missingPermissions = permissionsToRequest.filter {
+            androidx.core.content.ContextCompat.checkSelfPermission(this, it) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (missingPermissions.isNotEmpty()) requestPermissionLauncher.launch(missingPermissions.toTypedArray())
         
         cryptoProvider = CryptographyProvider.Default
         identityStore = AndroidIdentityStore(this, cryptoProvider)
@@ -165,6 +175,7 @@ class MainActivity : ComponentActivity() {
             onPeers = { peers, trustedNames ->
                 discoveredPeers.clear()
                 discoveredPeers.addAll(peers)
+                trustedDeviceNames.clear()
                 trustedNames.forEach { name ->
                     val clean = FastDropUiPresentation.cleanName(name)
                     if (clean !in trustedDeviceNames) trustedDeviceNames.add(clean)
@@ -207,17 +218,21 @@ class MainActivity : ComponentActivity() {
                             incomingPeerNameState.value = status.peer
                             appState.value = "Authenticating ${status.peer}..."
                         }
+                        is AndroidSessionStatus.WaitingForApproval -> appState.value = "Waiting for approval…"
                         is AndroidSessionStatus.Sending -> {
+                            lastSessionWasReceiving = false
                             appState.value = "Sending ${status.file}"
                             transferUiState.value = FastDropUiStatus.Transferring(true, status.file,
                                 incomingPeerNameState.value ?: "FastDrop device", status.current, status.total)
                         }
                         is AndroidSessionStatus.Receiving -> {
+                            lastSessionWasReceiving = true
                             appState.value = "Receiving ${status.file}"
                             transferUiState.value = FastDropUiStatus.Transferring(false, status.file,
                                 incomingPeerNameState.value ?: "FastDrop device", status.current, status.total)
                         }
-                        is AndroidSessionStatus.Completed -> appState.value = "Transfer success! ${status.file}"
+                        is AndroidSessionStatus.Completed -> appState.value =
+                            if (lastSessionWasReceiving) "Received successfully" else "Sent successfully"
                         AndroidSessionStatus.Busy -> appState.value = "Device busy"
                         AndroidSessionStatus.Rejected -> appState.value = "Transfer rejected"
                         AndroidSessionStatus.IntegrityFailed -> appState.value = "File integrity check failed"
@@ -291,6 +306,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        startRuntimeIfReady()
+    }
+
+    private fun startRuntimeIfReady() {
+        if (runtimeStarted || !::lanRuntime.isInitialized) return
+        runtimeStarted = true
         startServer()
         lanRuntime.start()
     }
@@ -616,6 +637,20 @@ class MainActivity : ComponentActivity() {
                     legacyTransferInProgress = false
                 }
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!runtimeStarted && ::lanRuntime.isInitialized) {
+            val nearbyGranted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU ||
+                androidx.core.content.ContextCompat.checkSelfPermission(this,
+                    android.Manifest.permission.NEARBY_WIFI_DEVICES) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            val locationGranted = androidx.core.content.ContextCompat.checkSelfPermission(this,
+                android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (nearbyGranted && locationGranted) startRuntimeIfReady()
         }
     }
 

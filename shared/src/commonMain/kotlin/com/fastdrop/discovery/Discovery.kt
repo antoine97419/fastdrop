@@ -1,7 +1,7 @@
 package com.fastdrop.discovery
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.combine
 
 enum class DiscoveryType {
     MDNS,
@@ -35,16 +35,8 @@ class DiscoveryManager(
     private val localDeviceId: String? = null,
     private val onDuplicate: (String) -> Unit = {}
 ) {
-    val peers: Flow<List<DiscoveredPeer>> = kotlinx.coroutines.flow.channelFlow {
-        val latest = Array(providers.size) { emptyList<DiscoveredPeer>() }
-        providers.forEachIndexed { index, provider ->
-            launch {
-                provider.peers.collect { list ->
-                    latest[index] = list
-                    send(mergeDiscoveredPeers(latest.flatMap { it }, localDeviceId, onDuplicate))
-                }
-            }
-        }
+    val peers: Flow<List<DiscoveredPeer>> = combine(providers.map { it.peers }) { latest ->
+        mergeDiscoveredPeers(latest.flatMap { it }, localDeviceId, onDuplicate)
     }
 
     suspend fun startAll() {

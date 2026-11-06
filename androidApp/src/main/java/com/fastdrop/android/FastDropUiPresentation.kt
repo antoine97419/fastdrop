@@ -64,7 +64,7 @@ internal object FastDropUiPresentation {
         raw == "Device busy" -> FastDropUiStatus.Busy
         raw.startsWith("Connecting") -> FastDropUiStatus.Connecting
         raw.startsWith("Authenticating") -> FastDropUiStatus.Authenticating
-        raw.contains("SAS", ignoreCase = true) -> FastDropUiStatus.WaitingForApproval
+        raw.contains("SAS", ignoreCase = true) || raw.startsWith("Waiting for approval") -> FastDropUiStatus.WaitingForApproval
         raw.startsWith("Waiting for file") -> FastDropUiStatus.WaitingForFile
         raw.startsWith("Sending") -> FastDropUiStatus.Sending
         raw.startsWith("Receiving") -> FastDropUiStatus.Receiving

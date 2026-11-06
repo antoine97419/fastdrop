@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.util.Log
+import android.os.Handler
+import android.os.Looper
 import com.fastdrop.FastDropConfig
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +20,12 @@ class AndroidNsdDiscoveryProvider private constructor(
     private val state = MutableStateFlow<List<DiscoveredPeer>>(emptyList())
     override val peers: Flow<List<DiscoveredPeer>> = state
     private val found = mutableMapOf<String, DiscoveredPeer>()
+    private val handler = Handler(Looper.getMainLooper())
+    private val pendingResolutions = LinkedHashMap<String, Pair<NsdServiceInfo, Int>>()
+    private val generations = mutableMapOf<String, Int>()
+    private var resolving: String? = null
+    private var resolutionToken = 0L
+    private var browseRestartDelayMs = 2_000L
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var unregisterRequested = false
     private var unregisterAttempts = 0
@@ -31,7 +39,10 @@ class AndroidNsdDiscoveryProvider private constructor(
     )
 
     override suspend fun start() = lifecycle.start()
-    override suspend fun stop() = lifecycle.stop()
+    override suspend fun stop() {
+        handler.removeCallbacksAndMessages(null)
+        lifecycle.stop()
+    }
 
     private fun registerService() {
         check(registrationListener == null) { "NSD registration is still active" }
@@ -104,48 +115,37 @@ class AndroidNsdDiscoveryProvider private constructor(
         check(discoveryListener == null) { "NSD browse is still active" }
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
+                browseRestartDelayMs = 2_000L
                 Log.d(TAG, "[Discovery][Android] browse started")
             }
             override fun onServiceFound(service: NsdServiceInfo) {
                 if (discoveryListener !== this) return
-                val browseListener = this
-                nsdManager.resolveService(service, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
-                        Log.d(TAG, "[Discovery][Android] resolve failed code=$errorCode")
-                    }
-                    override fun onServiceResolved(info: NsdServiceInfo) {
-                        if (discoveryListener !== browseListener) return
-                        val txt = listOf("version", "deviceId", "name", "capabilities", "sessionVersion")
-                            .associateWith { key -> info.attributes[key]?.toString(Charsets.UTF_8) ?: "" }
-                        val record = FastDropServiceRecord.parse(txt, info.serviceName) ?: return
-                        if (record.deviceId == localDeviceId) {
-                            Log.d(TAG, "[Discovery][Android] ignoring local peer deviceId=${record.deviceId}")
-                            return
-                        }
-                        val address = info.host?.hostAddress ?: return
-                        val peer = DiscoveredPeer(info.serviceName, record.name, listOf(address), info.port,
-                            DiscoveryType.MDNS, record.version, true, record.deviceId, record.capabilities, record.sessionVersion)
-                        synchronized(found) {
-                            found[info.serviceName] = peer
-                            state.value = mergeDiscoveredPeers(found.values.toList(), localDeviceId) {
-                                Log.d(TAG, "[Discovery] merged duplicate peer deviceId=$it")
-                            }
-                        }
-                    }
-                })
+                val key = service.serviceName
+                generations[key] = (generations[key] ?: 0) + 1
+                pendingResolutions[key] = service to 0
+                resolveNext(this)
             }
             override fun onServiceLost(service: NsdServiceInfo) {
+                if (discoveryListener !== this) return
+                val key = service.serviceName
+                generations[key] = (generations[key] ?: 0) + 1
+                pendingResolutions.remove(key)
                 synchronized(found) {
-                    found.remove(service.serviceName)
+                    found.remove(key)
                     state.value = mergeDiscoveredPeers(found.values.toList(), localDeviceId)
                 }
             }
             override fun onDiscoveryStopped(serviceType: String) {
                 Log.d(TAG, "[Discovery][Android] browse stopped")
+                if (discoveryListener === this) {
+                    stopDiscovery()
+                    scheduleBrowseRestart()
+                }
             }
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e(TAG, "[Discovery][Android] browse failed code=$errorCode")
                 stopDiscovery()
+                scheduleBrowseRestart()
             }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e(TAG, "[Discovery][Android] browse stop failed code=$errorCode")
@@ -160,7 +160,90 @@ class AndroidNsdDiscoveryProvider private constructor(
         }
     }
 
+    private fun resolveNext(browseListener: NsdManager.DiscoveryListener) {
+        if (discoveryListener !== browseListener || resolving != null) return
+        val entry = pendingResolutions.entries.firstOrNull() ?: return
+        val key = entry.key
+        val (service, attempt) = entry.value
+        pendingResolutions.remove(key)
+        resolving = key
+        val token = ++resolutionToken
+        val generation = generations[key]
+        lateinit var timeout: Runnable
+        val callback = object : NsdManager.ResolveListener {
+            override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
+                if (resolving != key || resolutionToken != token) return
+                handler.removeCallbacks(timeout)
+                Log.d(TAG, "[Discovery][Android] resolve failed name=$key code=$errorCode attempt=$attempt")
+                if (discoveryListener === browseListener && generations[key] == generation && attempt < 2) {
+                    handler.postDelayed({
+                        if (discoveryListener === browseListener && generations[key] == generation) {
+                            pendingResolutions.putIfAbsent(key, service to (attempt + 1))
+                            resolveNext(browseListener)
+                        }
+                    }, 700L * (attempt + 1))
+                }
+                if (resolving == key) resolving = null
+                resolveNext(browseListener)
+            }
+            override fun onServiceResolved(info: NsdServiceInfo) {
+                if (resolving != key || resolutionToken != token) return
+                handler.removeCallbacks(timeout)
+                resolving = null
+                if (discoveryListener === browseListener && generations[key] == generation) {
+                    val txt = listOf("version", "deviceId", "name", "capabilities", "sessionVersion")
+                        .associateWith { attribute -> info.attributes[attribute]?.toString(Charsets.UTF_8) ?: "" }
+                    val record = FastDropServiceRecord.parse(txt, info.serviceName)
+                    if (record != null && record.deviceId != localDeviceId) {
+                        val address = info.host?.hostAddress
+                        if (address != null) {
+                            val peer = DiscoveredPeer(key, record.name, listOf(address), info.port,
+                                DiscoveryType.MDNS, record.version, true, record.deviceId,
+                                record.capabilities, record.sessionVersion)
+                            synchronized(found) {
+                                found[key] = peer
+                                state.value = mergeDiscoveredPeers(found.values.toList(), localDeviceId) {
+                                    Log.d(TAG, "[Discovery] merged duplicate peer deviceId=$it")
+                                }
+                            }
+                        }
+                    } else if (record?.deviceId == localDeviceId) {
+                        Log.d(TAG, "[Discovery][Android] ignoring local peer deviceId=$localDeviceId")
+                    }
+                }
+                resolveNext(browseListener)
+            }
+        }
+        timeout = Runnable { callback.onResolveFailed(service, -2) }
+        handler.postDelayed(timeout, 5_000L)
+        try {
+            nsdManager.resolveService(service, callback)
+        } catch (error: Exception) {
+            Log.e(TAG, "[Discovery][Android] resolve request failed name=$key", error)
+            callback.onResolveFailed(service, -1)
+        }
+    }
+
+    private fun scheduleBrowseRestart() {
+        if (lifecycle.state != NsdRegistrationLifecycle.State.STARTING &&
+            lifecycle.state != NsdRegistrationLifecycle.State.STARTED) return
+        val delayMs = browseRestartDelayMs
+        browseRestartDelayMs = (browseRestartDelayMs * 2).coerceAtMost(30_000L)
+        handler.postDelayed({
+            if (discoveryListener == null &&
+                (lifecycle.state == NsdRegistrationLifecycle.State.STARTING ||
+                    lifecycle.state == NsdRegistrationLifecycle.State.STARTED)) {
+                runCatching { discoverServices() }
+                    .onFailure { Log.e(TAG, "[Discovery][Android] browse restart failed", it); scheduleBrowseRestart() }
+            }
+        }, delayMs)
+    }
+
     private fun stopDiscovery() {
+        handler.removeCallbacksAndMessages(null)
+        pendingResolutions.clear()
+        generations.clear()
+        resolving = null
         val listener = discoveryListener
         discoveryListener = null
         if (listener != null) runCatching { nsdManager.stopServiceDiscovery(listener) }

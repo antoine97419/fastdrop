@@ -25,8 +25,10 @@ sealed interface DesktopStatus {
     data object Busy : DesktopStatus
     data class WaitingForDevice(val file: String) : DesktopStatus
     data class Authenticating(val peer: String) : DesktopStatus
+    data class WaitingForApproval(val file: String) : DesktopStatus
     data class Sending(val file: String, val current: Long, val total: Long) : DesktopStatus
-    data class Receiving(val file: String, val current: Long, val total: Long) : DesktopStatus
+    data class Receiving(val file: String, val current: Long, val total: Long,
+                         val peerName: String = "FastDrop device") : DesktopStatus
     data class Completed(val file: String) : DesktopStatus
     data object Rejected : DesktopStatus
     data object IntegrityFailed : DesktopStatus
@@ -64,6 +66,8 @@ class DesktopFastDropRuntime internal constructor(
     private data class PreparedReceiver(val channel: SecureChannel, val finished: CompletableDeferred<Unit>)
     private val prepared = ConcurrentHashMap<String, PreparedReceiver>()
     private val authenticatedIds = ConcurrentHashMap<SecureChannel, String>()
+    private val authenticatedNames = ConcurrentHashMap<SecureChannel, String>()
+    private var statusResetJob: Job? = null
     @Volatile private var discoveredPeers: List<DiscoveredPeer> = emptyList()
     private var pendingSas: CompletableDeferred<Boolean>? = null
     private var running = false
@@ -124,11 +128,13 @@ class DesktopFastDropRuntime internal constructor(
                             val success = transfers.receiveFile(secure,
                                 onOfferReceived = { offer ->
                                     fileName = transfers.sanitizeFilename(offer.name)
-                                    setStatus(DesktopStatus.Receiving(fileName, 0, offer.size))
+                                    setStatus(DesktopStatus.Receiving(fileName, 0, offer.size,
+                                        authenticatedNames[secure] ?: "FastDrop device"))
                                     DesktopIncomingFileDestination(File(
                                         System.getProperty("user.home"), "Downloads/FastDrop/$fileName"))
                                 }, onProgress = { current, total ->
-                                    setStatus(DesktopStatus.Receiving(fileName, current, total))
+                                    setStatus(DesktopStatus.Receiving(fileName, current, total,
+                                        authenticatedNames[secure] ?: "FastDrop device"))
                                 })
                             setStatus(if (success) DesktopStatus.Completed(fileName)
                                       else DesktopStatus.Error("Transfer failed"))
@@ -138,17 +144,12 @@ class DesktopFastDropRuntime internal constructor(
                             if (locked) activeTransfer.unlock()
                         }
                     },
-                    closeSecureChannel = { authenticatedIds.remove(it); it.close() },
+                    closeSecureChannel = { authenticatedIds.remove(it); authenticatedNames.remove(it); it.close() },
                     closeRawConnection = { it.close() },
                     stopHosting = { transport.stop() },
                     onListening = {
-                        if (mutableState.value.status is DesktopStatus.Completed ||
-                            mutableState.value.status is DesktopStatus.Rejected ||
-                            mutableState.value.status is DesktopStatus.IntegrityFailed ||
-                            mutableState.value.status is DesktopStatus.ConnectionLost ||
-                            mutableState.value.status is DesktopStatus.Error) {
-                            scope.launch { delay(3000); setStatus(DesktopStatus.Ready) }
-                        } else if (!activeTransfer.isLocked) setStatus(DesktopStatus.Ready)
+                        if (!activeTransfer.isLocked && mutableState.value.status is DesktopStatus.Starting)
+                            setStatus(DesktopStatus.Ready)
                     },
                     onSessionMessage = { message ->
                         if (message.startsWith("Client session failed"))
@@ -170,13 +171,13 @@ class DesktopFastDropRuntime internal constructor(
     }
 
     fun send(file: File, deviceId: String?) {
-        require(file.isFile)
+        if (!file.isFile) { setStatus(DesktopStatus.Error("File is unavailable")); return }
         scope.launch {
             if (!activeTransfer.tryLock()) { setStatus(DesktopStatus.Busy); return@launch }
             val peer = discoveredPeers.firstOrNull { it.deviceId == deviceId && deviceId != null }
             if (peer == null || peer.sessionVersion != SessionProtocol.VERSION || peer.addresses.isEmpty()) {
                 activeTransfer.unlock()
-                setStatus(DesktopStatus.Error("Peer does not support session version 1"))
+                setStatus(DesktopStatus.Error("Device is unavailable or needs a newer FastDrop version"))
                 return@launch
             }
             val outgoingTransport = ManualLanTransport(peer.port)
@@ -197,6 +198,7 @@ class DesktopFastDropRuntime internal constructor(
                     }
                 }
                 if (slot == null && raw == null && trust.getPeer(deviceId!!) != null) {
+                    setStatus(DesktopStatus.WaitingForDevice(file.name))
                     slot = withTimeoutOrNull(35_000) {
                         var found: PreparedReceiver? = null
                         while (found == null) {
@@ -226,6 +228,7 @@ class DesktopFastDropRuntime internal constructor(
                     return@launch
                 }
                 FastDropDiagnostics.debug("[Session] READY; transfer started")
+                setStatus(DesktopStatus.WaitingForApproval(file.name))
                 var outcome = TransferOutcome.FAILED
                 transfers.sendFile(secure, DesktopTransferFileSource(file),
                     onProgress = { current, total -> setStatus(DesktopStatus.Sending(file.name, current, total)) },
@@ -247,7 +250,7 @@ class DesktopFastDropRuntime internal constructor(
                 withContext(NonCancellable) {
                     if (slot != null) slot.finished.complete(Unit)
                     else runCatching { (secure ?: raw)?.close() }
-                    if (secure != null) authenticatedIds.remove(secure)
+                    if (secure != null) { authenticatedIds.remove(secure); authenticatedNames.remove(secure) }
                     runCatching { outgoingTransport.stop() }
                 }
                 activeTransfer.unlock()
@@ -277,6 +280,7 @@ class DesktopFastDropRuntime internal constructor(
                 if (peer.deviceId == verification.deviceId) peer.copy(trusted = true) else peer
             })
         }
+        authenticatedNames[secure] = name
         authenticatedIds[secure] = when (verification) {
             is PeerVerification.NewPeer -> verification.deviceId
             is PeerVerification.TrustedPeer -> verification.deviceId
@@ -291,6 +295,7 @@ class DesktopFastDropRuntime internal constructor(
         if (!running) return
         running = false
         pendingSas?.complete(false)
+        statusResetJob?.cancel()
         prepared.values.forEach { it.finished.complete(Unit) }
         prepared.clear()
         startupJob?.cancelAndJoin()
@@ -304,7 +309,19 @@ class DesktopFastDropRuntime internal constructor(
         scope.cancel()
     }
 
-    private fun setStatus(status: DesktopStatus) {
+    @Synchronized private fun setStatus(status: DesktopStatus) {
+        statusResetJob?.cancel()
         mutableState.value = mutableState.value.copy(status = status)
+        val terminal = status is DesktopStatus.Completed || status is DesktopStatus.Rejected ||
+            status is DesktopStatus.Busy || status is DesktopStatus.IntegrityFailed ||
+            status is DesktopStatus.ConnectionLost ||
+            status is DesktopStatus.Error
+        if (terminal) statusResetJob = scope.launch {
+            delay(5_000)
+            synchronized(this@DesktopFastDropRuntime) {
+                if (mutableState.value.status == status && running)
+                    mutableState.value = mutableState.value.copy(status = DesktopStatus.Ready)
+            }
+        }
     }
 }

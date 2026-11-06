@@ -55,6 +55,9 @@ internal class DefaultWindowsBridgeExecutableResolver(
         }
 
         val candidates = linkedSetOf<Path>()
+        systemProperty("compose.application.resources.dir")?.takeIf { it.isNotBlank() }?.let { resources ->
+            candidates.add(Paths.get(resources).resolve("bridge/windows/$BRIDGE_EXE"))
+        }
         applicationLocation?.let { location ->
             val base = if (location.fileName?.toString()?.endsWith(".jar", ignoreCase = true) == true) {
                 location.parent
@@ -70,6 +73,10 @@ internal class DefaultWindowsBridgeExecutableResolver(
         candidates.add(workingDirectory.resolve(BRIDGE_EXE))
         candidates.add(workingDirectory.resolve("bridge/windows/$PUBLISH_RELATIVE_PATH"))
         candidates.add(workingDirectory.resolve("shared/bridge/windows/$PUBLISH_RELATIVE_PATH"))
+        // Gradle :desktopApp:run may use desktopApp as its working directory.
+        workingDirectory.parent?.let { projectRoot ->
+            candidates.add(projectRoot.resolve("shared/bridge/windows/$PUBLISH_RELATIVE_PATH"))
+        }
 
         val normalized = candidates.map { it.toAbsolutePath().normalize() }
         return BridgeExecutableResolution(normalized.firstOrNull(isExecutableFile), normalized)

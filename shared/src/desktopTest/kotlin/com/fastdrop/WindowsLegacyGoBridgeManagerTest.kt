@@ -197,6 +197,32 @@ class WindowsLegacyGoBridgeManagerTest {
         assertEquals(expected, resolver.resolve().executable)
     }
 
+    @Test
+    fun developmentPathIsResolvedFromDesktopAppWorkingDirectory() {
+        val projectRoot = Paths.get("C:/project").toAbsolutePath().normalize()
+        val expected = projectRoot.resolve(
+            "shared/bridge/windows/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/FastDropBridge.exe"
+        )
+        val resolver = DefaultWindowsBridgeExecutableResolver(
+            systemProperty = { null }, environment = { null },
+            workingDirectory = projectRoot.resolve("desktopApp"),
+            applicationLocation = null, isExecutableFile = { it == expected }
+        )
+        assertEquals(expected, resolver.resolve().executable)
+    }
+
+    @Test
+    fun packagedBridgeIsResolvedFromApplicationResources() {
+        val resources = Paths.get("C:/FastDrop/app/resources").toAbsolutePath().normalize()
+        val expected = resources.resolve("bridge/windows/FastDropBridge.exe")
+        val resolver = DefaultWindowsBridgeExecutableResolver(
+            systemProperty = { name -> if (name == "compose.application.resources.dir") resources.toString() else null },
+            environment = { null }, workingDirectory = Paths.get("C:/elsewhere"),
+            applicationLocation = null, isExecutableFile = { it == expected }
+        )
+        assertEquals(expected, resolver.resolve().executable)
+    }
+
     private class BridgeFixture(
         dispatcher: CoroutineDispatcher,
         resolution: BridgeExecutableResolution = BridgeExecutableResolution(TEST_EXE, listOf(TEST_EXE)),

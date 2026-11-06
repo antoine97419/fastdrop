@@ -46,20 +46,30 @@ internal fun FastDropApp(
         Spacer(Modifier.height(8.dp))
         Text("Share files with nearby devices", color = MaterialTheme.colorScheme.secondary)
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(18.dp))
+        if (status == FastDropUiStatus.Idle || status == FastDropUiStatus.Searching)
+        Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
+            Text(
+                if (status == FastDropUiStatus.Idle) "Ready" else "Searching for nearby devices…",
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.height(18.dp))
         Button(onClick = onSendFiles, modifier = Modifier.fillMaxWidth()) { Text("Send files") }
 
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(24.dp))
         Text("Nearby devices", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(8.dp))
         LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
             if (devices.isEmpty()) {
                 item {
-                    Text(
-                        "No nearby FastDrop devices",
-                        color = MaterialTheme.colorScheme.secondary,
-                        modifier = Modifier.padding(vertical = 16.dp)
-                    )
+                    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp)) {
+                        Text("No nearby FastDrop devices", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(6.dp))
+                        Text("Keep FastDrop open on the other device.",
+                            color = MaterialTheme.colorScheme.secondary)
+                    }
                 }
             } else {
                 items(devices) { device ->
@@ -67,12 +77,15 @@ internal fun FastDropApp(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp)
                             .clickable { onSendClick(device.peer) }
                     ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(device.name, style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                if (device.trusted) "Trusted" else "Available",
-                                color = MaterialTheme.colorScheme.secondary
-                            )
+                        Row(modifier = Modifier.padding(16.dp)) {
+                            Text("▣", style = MaterialTheme.typography.headlineMedium,
+                                color = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(14.dp))
+                            Column {
+                                Text(device.name, style = MaterialTheme.typography.titleMedium)
+                                Text(if (device.trusted) "Trusted" else "Available",
+                                    color = MaterialTheme.colorScheme.secondary)
+                            }
                         }
                     }
                 }

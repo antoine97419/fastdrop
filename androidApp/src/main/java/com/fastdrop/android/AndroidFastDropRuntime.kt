@@ -22,6 +22,7 @@ internal sealed interface AndroidSessionStatus {
     data object Ready : AndroidSessionStatus
     data class Connecting(val peer: String) : AndroidSessionStatus
     data class Authenticating(val peer: String) : AndroidSessionStatus
+    data class WaitingForApproval(val file: String) : AndroidSessionStatus
     data class Sending(val file: String, val current: Long, val total: Long) : AndroidSessionStatus
     data class Receiving(val file: String, val current: Long, val total: Long) : AndroidSessionStatus
     data class Completed(val file: String) : AndroidSessionStatus
@@ -57,16 +58,29 @@ internal class AndroidFastDropRuntime(
     fun start() {
         if (listenerJob != null) return
         discoveryJob = scope.launch(Dispatchers.Main.immediate) {
-            discovery.startAll()
-            discovery.peers.collect { peers ->
-                latestPeers = peers
-                val trustedNames = withContext(Dispatchers.IO) {
-                    peers.filter { it.isFastDropService && it.deviceId != null }
-                        .filter { trusted.getPeer(it.deviceId!!) != null }
-                        .mapNotNull { it.displayName }.toSet()
+            var backoff = 2_000L
+            while (isActive) {
+                try {
+                    discovery.startAll()
+                    backoff = 2_000L
+                    discovery.peers.collect { peers ->
+                        latestPeers = peers
+                        val trustedNames = withContext(Dispatchers.IO) {
+                            peers.filter { it.isFastDropService && it.deviceId != null }
+                                .filter { trusted.getPeer(it.deviceId!!) != null }
+                                .mapNotNull { it.displayName }.toSet()
+                        }
+                        onPeers(peers, trustedNames)
+                        syncPreparedPeers(peers)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Log.e("FastDrop", "[Discovery][Android] runtime discovery failed; retrying", error)
+                    runCatching { discovery.stopAll() }
+                    delay(backoff)
+                    backoff = (backoff * 2).coerceAtMost(30_000L)
                 }
-                onPeers(peers, trustedNames)
-                syncPreparedPeers(peers)
             }
         }
         listenerJob = scope.launch {
@@ -125,8 +139,10 @@ internal class AndroidFastDropRuntime(
             var rejected = false
             val success = transfer.receiveFile(secure, onOfferReceived = { offer ->
                 fileName = transfer.sanitizeFilename(offer.name)
-                if (approveOffer(offer, peerName)) AndroidIncomingFileDestination(context, fileName)
-                else { rejected = true; null }
+                if (approveOffer(offer, peerName)) {
+                    update(AndroidSessionStatus.Receiving(fileName, 0, offer.size))
+                    AndroidIncomingFileDestination(context, fileName)
+                } else { rejected = true; null }
             }, onProgress = { current, total ->
                 update(AndroidSessionStatus.Receiving(fileName, current, total))
             })
@@ -198,8 +214,10 @@ internal class AndroidFastDropRuntime(
                     var rejected = false
                     val success = transfer.receiveFile(channel, onOfferReceived = { offer ->
                         fileName = transfer.sanitizeFilename(offer.name)
-                        if (approveOffer(offer, name)) AndroidIncomingFileDestination(context, fileName)
-                        else { rejected = true; null }
+                        if (approveOffer(offer, name)) {
+                            update(AndroidSessionStatus.Receiving(fileName, 0, offer.size))
+                            AndroidIncomingFileDestination(context, fileName)
+                        } else { rejected = true; null }
                     }, onProgress = { current, total ->
                         update(AndroidSessionStatus.Receiving(fileName, current, total))
                     })
@@ -255,6 +273,7 @@ internal class AndroidFastDropRuntime(
                 }
                 Log.d("FastDrop", "[Session] READY; transfer started")
                 val source = AndroidTransferFileSource(context, uri)
+                update(AndroidSessionStatus.WaitingForApproval(source.name))
                 var outcome = TransferOutcome.FAILED
                 transfer.sendFile(secure, source,
                     onProgress = { current, total ->
@@ -272,8 +291,12 @@ internal class AndroidFastDropRuntime(
                 throw cancelled
             } catch (error: Exception) {
                 Log.e("FastDrop", "[Session] send failed", error)
-                update(if (error is SessionProtocolException && error.message == "SAS rejected")
-                    AndroidSessionStatus.Rejected else AndroidSessionStatus.ConnectionLost)
+                update(when {
+                    error is SessionProtocolException && error.message == "SAS rejected" -> AndroidSessionStatus.Rejected
+                    error is java.io.FileNotFoundException || error is SecurityException ->
+                        AndroidSessionStatus.Error("File is unavailable")
+                    else -> AndroidSessionStatus.ConnectionLost
+                })
             } finally {
                 withContext(NonCancellable) {
                     runCatching { (secure ?: raw)?.close() }

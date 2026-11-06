@@ -20,3 +20,8 @@ shared/bridge/windows/obj/
 /.codex-android-home/
 /.codex-gradle-home/
 /.kotlin/
+
+# Local transfer and diagnostic files
+*.fastdrop-part
+*.log
+shared/fastdrop-test.txt

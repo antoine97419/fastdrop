@@ -3,6 +3,11 @@ package com.fastdrop.discovery
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -79,6 +84,23 @@ class DiscoveryManagerTest {
         val peers = manager.peers.first { it.size == 2 }
         assertEquals("Windows PC", peers.first { it.discoveryId == "pc" }.displayName)
         assertEquals(true, peers.first { it.discoveryId == "pc" }.isFastDropService)
+    }
+
+    @Test fun discoveryKeepsUpdatingAfterTransferLifecycle() = runTest {
+        val provider = TestDiscoveryProvider()
+        val manager = DiscoveryManager(listOf(provider))
+        val peer = DiscoveredPeer("pc", "Windows PC", listOf("192.168.1.5"), 47832,
+            DiscoveryType.MDNS, isFastDropService = true)
+        manager.startAll()
+        assertEquals(emptyList(), manager.peers.first())
+        provider.updatePeers(listOf(peer))
+        assertEquals(listOf(peer), manager.peers.first { it.isNotEmpty() })
+        provider.updatePeers(emptyList())
+        assertEquals(emptyList(), manager.peers.first())
+        assertEquals(true, provider.started)
+        assertEquals(false, provider.stopped)
+        provider.updatePeers(listOf(peer))
+        assertEquals(listOf(peer), manager.peers.first { it.isNotEmpty() })
     }
 
     @Test fun deduplicatesPublicIdentityAcrossProviders() = runTest {
