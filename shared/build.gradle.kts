@@ -59,6 +59,20 @@ android {
     }
 }
 
+val desktopMainCompilation = kotlin.targets
+    .getByName<org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget>("desktop")
+    .compilations
+    .getByName("main")
+
+tasks.register<JavaExec>("runFastDropDesktop") {
+    group = "application"
+    description = "Runs the FastDrop Desktop application"
+    dependsOn(desktopMainCompilation.compileTaskProvider)
+    mainClass.set("com.fastdrop.MainKt")
+    classpath = files(desktopMainCompilation.output.allOutputs, desktopMainCompilation.runtimeDependencyFiles)
+    standardInput = System.`in`
+}
+
 tasks.register("printClasspath") {
     doLast {
         val cp = configurations.getByName("desktopRuntimeClasspath").files.joinToString(":")

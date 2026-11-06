@@ -99,19 +99,31 @@ fun main(): Unit = runBlocking {
                 onCloseError = { println("Failed to close client session: ${it.message}") }
             )
 
+            val bridgeManager = WindowsLegacyGoBridgeManager(
+                onStdout = { println("[Bridge] $it") },
+                onStderr = { println("[Bridge][stderr] $it") }
+            )
+            val runtime = DesktopReceiverRuntime(
+                bridge = bridgeManager,
+                runReceiver = { receiver.run() },
+                stopReceiver = { receiver.stop() },
+                stopDiscovery = { discoveryManager.stopAll() }
+            )
+
             val shutdownHook = Thread {
                 runBlocking {
-                    receiver.stop()
-                    discoveryManager.stopAll()
+                    runtime.stop()
                 }
             }
             Runtime.getRuntime().addShutdownHook(shutdownHook)
 
             try {
-                receiver.run()
+                runtime.run()
+            } catch (exception: BridgeException) {
+                println("FastDrop receiver could not start: ${exception.message}")
             } finally {
-                receiver.stop()
-                discoveryManager.stopAll()
+                runtime.stop()
+                bridgeManager.close()
                 runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
             }
 
